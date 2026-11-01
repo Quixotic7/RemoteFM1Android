@@ -42,6 +42,8 @@ int rfma_add_device(JNIEnv *env, jobject midi_device, const char *name, int tran
 void rfma_remove_device(int id);
 // the list as JSON for Diagnostics: [{"id":1,"name":"FM-1","transport":1,"in":0,"out":0,"linked":1}, ...]
 uint32_t rfma_devices_json(char *buf, uint32_t n);
+// tests: the next n session writes (on any link) fail, as a MIDI service that stopped taking bytes would
+void rfma_test_fail_writes(int n);
 // changes so far (an add or a remove): a session thread rescans when this moves
 uint32_t rfma_generation(void);
 
@@ -57,6 +59,9 @@ typedef struct {
     uint32_t rx_bytes, rx_msgs, rx_max;                 // bytes in, AMidi messages (chunks) in, the longest chunk
     uint32_t tx_bytes, tx_msgs, tx_max, tx_short;       // bytes out, session writes, the longest, writes cut short
     uint32_t rx_errors;                                 // receive errors (the link dropped)
+    uint32_t write_fails;                               // session writes that failed (the link dropped, reopened)
+    uint32_t silent_reopens;                            // links dropped and reopened: nothing came for a while
+    uint32_t link_drops, port_opens;                    // links let go (any reason), port pairs opened
 } rfm_android_stats_t;
 
 typedef struct rfm_android rfm_android_t;
@@ -66,6 +71,8 @@ void rfm_android_rescan(rfm_android_t *m);                      // the session's
 void rfm_android_pump(rfm_android_t *m, uint32_t now_ms);       // every port read into the session
 void rfm_android_wait(rfm_android_t *m, uint32_t timeout_ms);   // sleeps up to min(timeout, 1 ms)
 void rfm_android_stats(const rfm_android_t *m, rfm_android_stats_t *st);
+// the next bytes received are logged (RFMMidi), with `why` ("after the session started")
+void rfm_android_log_next_rx(rfm_android_t *m, const char *why);
 // the name of the session link `sid` ("midi \"FM-1\" (USB)"), "" none
 void rfm_android_link_name(const rfm_android_t *m, int sid, char *buf, size_t n);
 void rfm_android_free(rfm_android_t *m);                        // closes every port (call after the session stopped)

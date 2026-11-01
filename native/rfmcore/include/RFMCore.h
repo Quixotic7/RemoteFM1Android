@@ -73,6 +73,10 @@ typedef struct {
     // the session's frames go on
     uint32_t midi_links, rx_bytes, tx_bytes, tx_short;
     char frame_link[96];
+    // PANEL_R heard, units lost, undecodable messages; links let go, reopened for silence, failed writes and reads;
+    // ms since the last panel event (-1 none)
+    uint32_t panel_r, lost, decode_errs, link_drops, silent_reopens, write_fails, rx_errors;
+    int32_t last_event_age_ms;
 } rfmc_status_t;
 void rfmc_status(rfmc_t *c, rfmc_status_t *st);
 

@@ -1,72 +1,121 @@
-# A1 on a real FM-1: the device test
+# The FM-1 device test, second round
 
-What is already verified without hardware (2026-11-01): the whole link on libremotefm1's fake unit, in the app's
-process and as a virtual MIDI device reached through Android's own MIDI service and AMidi (the same path a USB FM-1
-takes), on the emulator and on the Galaxy Tab A9+ (`scripts/emu_linktest.sh`, 14 tests). What only a real FM-1 can
-show: that Android lists it, that our candidate rule picks it, and how Android's USB and Bluetooth MIDI carry the
-SysEx frames. This is that test. It sends the FM-1 only the RemoteFM1 panel protocol (HELLO, SESSION, TILES, LEDS,
-TOUCH); nothing here installs or updates firmware.
+**What the first round found (2026-11-01, build A1 567cbac).** The FM-1 was found and ChoralRoot played, but:
+
+- Android sent the sound to the FM-1's USB audio by itself (USB audio becomes Android's default output when it is
+  plugged in), and the app's low-latency (MMAP) stream to it through the Qualcomm USB offload **restarted the
+  tablet** (kernel: SMMU fault in the audio DSP's memory, then a fatal NoC error). After the reboot Android's normal
+  path to the FM-1 failed instead (its audio HAL retried about 450 times a second for 17 s). Now the sound never
+  goes to a USB output unless you pick it (README, "Audio output" and "Known issues").
+- "Couldn't switch to the tablet speaker; then it disconnected": the switch that was tried is **Sound source**,
+  which chooses the panel (This tablet = on-screen keys, the link stopped), not where the sound goes. The log shows
+  the link stopped at 01:24:04 and started again at 01:24:14. The chips now say so; the speaker is under **Audio
+  output**.
+- After the reboot the keys and knobs did nothing while the screen showed ChoralRoot. Two things could do that: a
+  session write that failed (A1 then left the link dead while the device stayed, so nothing reached the unit again;
+  fixed: the link is dropped and its ports opened again), or the unit's side going quiet (now reopened after 6 s).
+  The FM-1 also left the USB bus once at 01:24:14 with the cable in (USB disconnect, then the Type-C partner gone
+  4 s later, back after 3 s, enumerated at 01:24:27): something on the FM-1's side reset. Nothing the app sends
+  could have caused that one (its ports were reopening at that moment; no byte had gone out yet).
+
+This round checks the new audio rule and gathers the logs that tell those causes apart. It sends the FM-1 only the
+RemoteFM1 panel protocol (HELLO, SESSION, TILES, LEDS, TOUCH); nothing here installs or updates firmware.
 
 **Before:** the FM-1 runs RemoteFM1 (0.2 or newer; 0.3.1 for velocity, pressure and TRS MIDI in). The tablet has the
-debug build of RemoteFM1 installed (Claude installs it; `app/build/outputs/apk/debug/app-debug.apk`).
+new debug build (Claude installs it; `app/build/outputs/apk/debug/app-debug.apk`). Note the time you start, and the
+time of anything odd (the FM-1's screen changes, its keys stop working, a disconnect): the logs are read by time.
 
-## 1. USB
+## 1. USB, the sound on the tablet's speaker
 
-1. Connect the FM-1 to the tablet with a USB-C cable (the tablet is the host). Android may ask *"Open RemoteFM1 to
-   handle FM-1?"*: tap **OK** (tick *Always* if offered).
-2. Open RemoteFM1. On the main page pick **Sound source: FM-1** and **Mode: Test pattern**.
-3. Look at the pill at the top right and at the FM-1:
+1. Connect the FM-1 to the tablet with the USB-C cable (the tablet is the host). If Android asks *"Open RemoteFM1 to
+   handle FM-1?"*, tap **OK**.
+2. In RemoteFM1: **Sound source: FM-1 · its keys and screen**, **Mode: Test pattern**.
 
 | What you see | What it means |
 | --- | --- |
-| Pill **Connected over USB**; the FM-1 shows the moving test screens (a UI, a gradient, boxes, noise, every 4 s) and its LEDs chase | **Pass.** Android listed the FM-1, the rule chose it, HELLO, SESSION and frames work over USB MIDI |
-| Pill **Not found** for more than a few seconds; the FM-1 shows its own waiting screen | Android lists the FM-1 but the rule didn't choose it, or the unit didn't answer HELLO. Open **Diagnostics**, card **MIDI devices (Android)**: send a photo of it (it says why: e.g. "USB 1209:000x is not 1209:0001") |
-| **MIDI devices** card says *None* | Android has no MIDI device for it: another cable or adapter; check the FM-1 is in RemoteFM1 (not its updater) |
-| Connects, then **Unit lost: searching…** again and again | Frames get lost on the way: send a photo of the **Link** card (ack timeouts, short writes) |
+| Pill **Connected over USB**; the FM-1 shows the moving test screens and its LEDs chase | **Pass** |
+| Pill **Not found**; the FM-1 shows its waiting screen | photograph Diagnostics' **MIDI devices** card |
+| **Unit lost: searching…** again and again | photograph the **Link** card |
 
-4. Press a few keys and buttons on the FM-1: each one's LED lights while held, and the strip at the bottom of the
-   FM-1's screen marks it. In **Diagnostics**, the **Panel** card lists the events (`key 7 C4 down vel 93`, ...).
-   Turn a knob and MASTER: they show there too.
-5. Back on the main page: **Mode: Firmware core**, **ChoralRoot**, **Sound on**. The FM-1 shows ChoralRoot's screen;
-   its keys play ChoralRoot on the tablet's speaker. (The FM-1's own USB audio output is A2.)
-6. Open **Diagnostics** and photograph the **Unit** and **Link** cards (they hold the numbers: frames, ack times,
-   fps, bytes, "touch", "TRS MIDI in", "Android MIDI").
-7. If the FM-1 has a MIDI cable in its TRS MIDI IN (0.3+): play something into it; **TRS MIDI in** counts up.
+3. Press keys and buttons, turn knobs and MASTER: their LEDs light, and Diagnostics › **Panel** lists the events.
+4. **Mode: Firmware core**, **ChoralRoot**, **Audio output: Automatic** (or **Speaker**), **Sound on**. Play.
+   - The sound comes from **the tablet's speaker**, not the FM-1. The line under the picker says "Playing on
+     Speaker"; Diagnostics › **Core** › output says `Speaker (pick: Automatic), device 2` or similar, `MMAP 0` or 1.
+   - The amber line under the picker ("Some Samsung tablets restart…") shows because the FM-1's USB audio is listed.
+5. Play for **5 minutes**, pressing keys now and then. Watch for: keys that stop working, the FM-1's screen freezing,
+   the FM-1 restarting (its boot or waiting screen), the pill changing. Note the time of each.
+6. Open **Diagnostics** and photograph the **Unit** and **Link** cards. The Link card now has: `events … last N s
+   ago`, `PANEL_R … heard, units lost …, session restarts …`, `Android MIDI … rx … B`, `port drops …`.
+7. **Unplug nothing.** Switch **Sound off**, then on again: the speaker again, never the FM-1.
+8. If the FM-1 has a MIDI cable in its TRS MIDI IN (0.3+): play something into it; **TRS MIDI in** counts up.
+
+**An FM-1 reset or a USB reset?** If the FM-1 drops off (the pill goes to Not found, then comes back):
+
+- Look at the FM-1 while it happens: an FM-1 that restarts shows its boot screen, then RemoteFM1's waiting screen.
+  If its screen stays as it was (ChoralRoot's), only the USB connection reset.
+- The log tells too (Claude reads it): `RFMLink: unit found: … its session 1` after the drop = the FM-1 kept running
+  (it still had its session); `its session 0` = it started afresh (or its keepalive ran out). The tablet's own log
+  says whether the USB data went first (`usb-service.qti: Disconnect received`) or the cable's Type-C connection
+  (`typec/port0/port0-partner` removed), and when.
 
 ## 2. Bluetooth
 
-1. Unplug the USB cable. The FM-1 runs its Bluetooth build of RemoteFM1 and shows "FM-1 XXXX" on its waiting screen.
-2. In RemoteFM1 tap **Bluetooth…**, then **Allow nearby devices** (asked only here, once). The list shows
-   **FM-1 XXXX** in bold within a few seconds; tap **Connect**.
+As before: unplug the USB cable; the FM-1 runs its Bluetooth build and shows "FM-1 XXXX" on its waiting screen. In
+RemoteFM1 tap **Bluetooth…**, **Allow nearby devices**, then **Connect** on **FM-1 XXXX**.
 
 | What you see | What it means |
 | --- | --- |
-| Pill **Connected over Bluetooth**; the FM-1 shows the test screens, changing whole (slower than USB: a few frames a second at a page change) | **Pass.** Diagnostics › Link says `ble 1, HOLD on`; **budget** is 550 (or 3000 on a 0.2.2+ unit with the fast radio) |
-| The list stays empty | The FM-1 isn't advertising (it's connected to another phone or a computer?), or Bluetooth is off |
-| Connect fails, or **Not found** | Photograph Diagnostics' **MIDI devices** card |
-| Connected over **USB** while on Bluetooth | (can't happen with the cable out; if it does, tell Claude) |
+| Pill **Connected over Bluetooth**; the test screens change whole, slower than USB | **Pass.** Diagnostics › Link says `ble 1, HOLD on` |
+| The list stays empty | the FM-1 isn't advertising (connected elsewhere?), or Bluetooth is off |
+| Connect fails, or **Not found** | photograph Diagnostics' **MIDI devices** card |
 
-3. Press keys: their LEDs light, as over USB. Try **Firmware core** with sound, as above.
-4. Quit RemoteFM1 (swipe it away), open it again: it reconnects to the same FM-1 by itself within a few seconds.
-5. Turn the FM-1 off and on: the app finds it again on its own (it retries after 2, 5, 10, 20, 30 s).
+Then: press keys (LEDs light); **Firmware core** with sound (the tablet's speaker); quit RemoteFM1 (swipe it away)
+and open it again: it reconnects by itself within a few seconds; turn the FM-1 off and on: found again on its own
+(it retries after 2, 5, 10, 20, 30 s).
 
-## 3. The logs (Claude collects them)
+## 3. Optional, last: the sound to the FM-1's USB audio
 
-The tablet's USB port is taken by the FM-1 during part 1, so the log is read afterwards (Android keeps it): plug the
-tablet back into the Mac, and Claude runs
+**This may restart the tablet** (it did in round one, with the old build's low-latency stream). Do it only at the
+end, with nothing unsaved on the tablet, and only if you want to know whether the careful path works.
 
-    adb -s R95Y906QALT logcat -d -s RFMMidi:I RFMApp:I RFMService:W > build/fm1-device.log
+1. USB again, **Firmware core**, **Sound on**.
+2. **Audio output: FM-1 (USB)** (the row with the amber warning).
+3. Play for one minute. The sound should come from the FM-1. Diagnostics › Core › output says
+   `FM-1 (USB) (pick: FM-1 (USB)), device N, MMAP 0, USB careful mode`.
+4. Pick **Speaker** again. If the tablet restarted, just tell Claude the time; the logs survive the reboot.
 
-`RFMMidi` lines show exactly what Android reported for the FM-1 (`device #N USB name=... manufacturer=... product=...
-usb=1209:0001 ...`), whether it was a candidate and why, and the links the session opened. That line settles the
-USB name rule (README, "The FM-1 candidate rule").
+The USB pick is not saved: after quitting the app it is Automatic (the speaker) again.
 
-## 4. What each part proves
+## 4. The logs (Claude collects them)
+
+The tablet's USB port is taken by the FM-1, so the logs are read afterwards: plug the tablet into the Mac, and Claude
+runs (nothing is changed on the tablet)
+
+    adb -s R95Y906QALT logcat -d -b all > build/fm1-round2-all.log
+    adb -s R95Y906QALT logcat -d -s RFMMidi:I RFMLink:I RFMApp:I RFMAudio:I RFMService:W > build/fm1-round2.log
+
+What the app's lines show:
+
+- `RFMMidi`: each device Android lists (`device #N USB name=... usb=1209:0001`), why it is a candidate, every port
+  pair opened and closed (`ports open: … input port 0 (we send to it), output port 0 (we read it)`), the first bytes
+  after the ports open and after each session start, and why a link ended (`link gone: <name>: <why>`: the device
+  was removed, a write failed, a read failed, nothing from the unit for N s, the app stopped the link).
+- `RFMLink`: the session's states and why, `unit found: … its session 0/1`, and every 5 s: rx/tx bytes, PANEL_R and
+  events (with the change since the last line), frames, acks, sessions, units lost, link drops, silent reopens.
+- `RFMApp`: what you tapped (Sound source, mode, sound on/off, audio output) and where each audio stream really went
+  (`audio: asked Speaker (device 2); playing on device 2, AAudio exclusive, performance 12, MMAP 1`).
+- `RFMAudio`: the stream as Oboe opened it (asked device, got device, sharing, performance mode, MMAP).
+
+The key question this round answers: **with the sound on the speaker, does the FM-1 still drop off USB?** If it
+doesn't, the drops were the USB audio's; if it does, the `RFMLink`/`RFMMidi` lines and the times tell whether the
+FM-1 restarted, the USB reset, or the link stopped hearing it.
+
+## 5. What each part proves
 
 | Part | Proves |
 | --- | --- |
-| 1.3 pattern moves | Android MIDI discovery, the candidate rule on USB, AMidi SysEx out (frames up to ~1.2 KB, cut by AMidi into 1015-byte packets), SysEx in (HELLO_R, FRAME_ACK) |
-| 1.4 LEDs and events | the panel's plain MIDI in, LEDS out |
-| 1.5 core plays | Core mode: the FM-1 as the panel of a core running on the tablet |
-| 2 | Bluetooth LE MIDI: our scan page, `openBluetoothDevice`, the pacing libremotefm1 applies when HELLO_R says Bluetooth |
-| 2.4 / 2.5 | the remembered unit and the reconnect rule |
+| 1.2–1.3 | discovery, the candidate rule, SysEx both ways over USB MIDI, the panel's events and LEDs |
+| 1.4, 1.7 | the audio rule: the speaker by default with the FM-1 plugged in, never the FM-1 by itself |
+| 1.5–1.6 | a long USB session: no dead keys, no drops (or, if there are, which kind) |
+| 2 | Bluetooth LE MIDI: the scan page, `openBluetoothDevice`, the pacing, the remembered unit, the reconnect rule |
+| 3 | (optional) the careful USB audio path on this tablet |

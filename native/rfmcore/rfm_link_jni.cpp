@@ -209,6 +209,14 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmLink_nativeStatus(JNIE
     j.num("tx_bytes", st.tx_bytes);
     j.num("tx_short", st.tx_short);
     j.str("frame_link", st.frame_link);
+    j.num("panel_r", st.panel_r);
+    j.num("lost", st.lost);
+    j.num("decode_errs", st.decode_errs);
+    j.num("link_drops", st.link_drops);
+    j.num("silent_reopens", st.silent_reopens);
+    j.num("write_fails", st.write_fails);
+    j.num("rx_errors", st.rx_errors);
+    j.num("last_event_age_ms", st.last_event_age_ms);
     return env->NewStringUTF(j.done().c_str());
 }
 
@@ -320,6 +328,11 @@ JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmMidi_nativeAddDevice(JNIE
 {
     const std::string n = jstr(env, name), vn = jstr(env, virtualName);
     return rfma_add_device(env, device, n.c_str(), transport, inPort, outPort, vn.c_str());
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmMidi_nativeTestFailWrites(JNIEnv *, jclass, jint n)
+{
+    rfma_test_fail_writes(n);
 }
 
 JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmMidi_nativeRemoveDevice(JNIEnv *, jclass, jint id)

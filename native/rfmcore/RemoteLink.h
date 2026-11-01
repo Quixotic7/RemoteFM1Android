@@ -105,6 +105,10 @@ public:
         uint32_t touchWanted = 0, touch = 0, touchSent = 0;
         // (Android) the back end: MIDI links open now, bytes in, bytes lost (nobody pumping), short writes
         uint32_t midiLinks = 0, rxBytes = 0, rxDropped = 0, txBytes = 0, txShort = 0;
+        // the session's PANEL_R heard, units lost (silent, no PANEL_R, a link gone), messages it could not decode;
+        // the back end's links let go, reopened for silence, writes and reads failed
+        uint32_t panelR = 0, lost = 0, decodeErrs = 0, linkDrops = 0, silentReopens = 0, writeFails = 0, rxErrors = 0;
+        int32_t lastEventAgeMs = -1;                // since the last panel event (-1: none this link's life)
         std::string frameLinkName;                  // the session's frame link ("midi \"FM-1\" (usb)")
     };
     Status status() const;
@@ -220,7 +224,8 @@ private:
     static void cbEvent(void *ctx, const rfm_event_t *e);
     static void cbState(void *ctx, int st, const char *why);
     static void cbRescan(void *ctx);
-    static void cbLog(void *ctx, const char *m);
+    static void cbLog(void *ctx, const char *m);    // logged (RFMLink) and kept as the last line
+    static void cbNote(void *ctx, const char *m);   // only kept
     static void cbMidiIn(void *ctx, const uint8_t *msgs, uint32_t n);
     static int loopWrite(void *ctx, const uint8_t *p, uint32_t n);
 
@@ -244,6 +249,8 @@ private:
     int lastState_ = -1;
     bool wasConnected_ = false;
     uint32_t statFrames_ = 0, statT_ = 0;
+    uint32_t logT_ = 0, logRx_ = 0, logPanelR_ = 0, logEvents_ = 0;    // (the session thread) the 5 s log line's
+    std::atomic<uint32_t> lastEventT_{0};           // now() + 1 at the last panel event (0: none)
     std::chrono::steady_clock::time_point t0_;
     // the status (the session thread writes, anyone reads)
     mutable std::mutex stMu_;

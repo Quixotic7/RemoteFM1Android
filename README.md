@@ -14,7 +14,9 @@ service. Each core's memory is kept in `files/cores/<id>.bin` as on iOS (safe wr
 app going to the background, Pattern mode, a core switch, Restart, a firmware's own reboot, the service stopping);
 Restart firmware (a power cycle from the flash); the audio output picked from Android's outputs (Oboe device id), a
 note when the sound goes to a USB sound card, the stream reopened after a disconnect or when the picked output goes.
-No faceplate yet (A3).
+No faceplate yet (A3). After the first real FM-1 test (2026-11-01, see "Known issues"): the sound never goes to a USB
+output unless picked, and the link reopens a link whose write failed or whose unit went quiet; the second-round
+device test is [docs/A1-DEVICE-TEST.md](docs/A1-DEVICE-TEST.md).
 
 ## Layout
 
@@ -122,10 +124,12 @@ the app is touched):
 
     scripts/emu_linktest.sh [AVD]                   # NOBUILD=1, OUT=... (default build/emu-linktest), TEST=<method>
 
-`LinkTest` (14 tests) runs on libremotefm1's fake unit: in the app's process (the session and M1's test pattern; the
+`LinkTest` (18 tests) runs on libremotefm1's fake unit: in the app's process (the session and M1's test pattern; the
 panel's events and the LEDs they light; Bluetooth pacing and HOLD; stop and start; ChoralRoot on the fake panel, a key
 making sound; TRS MIDI in and TOUCH, ported from iOS's TrsMidiTests and TouchTests on the echo core), and through
-Android's MIDI service (the virtual FM-1 found, opened and driven over AMidi; ChoralRoot played from it). It saves
+Android's MIDI service (the virtual FM-1 found, opened and driven over AMidi; ChoralRoot played from it; and what the
+first FM-1 test raised: the app killed and opened again while the unit keeps its session, the device seen twice, a
+failed write, the unit's side going quiet for a while). It saves
 `linktest.json`, the instrumentation output and the log (tags RFMLinkTest, RFMMidi, RFMFakeFm1) under `$OUT`.
 
 The real FM-1 over USB and Bluetooth: [docs/A1-DEVICE-TEST.md](docs/A1-DEVICE-TEST.md).
@@ -165,6 +169,14 @@ v0.6.2's engine; the seven tests pass either way.)
   both directions. Names are matched tolerantly: "FM-1", "FM 1", "FM_1", "FM1" not followed by a digit. Every device
   Android reports is logged (`RFMMidi`: name, manufacturer, product, USB IDs, ports) so the first real FM-1 shows
   what Android calls it.
+- **Links that break.** A session write that fails (AMidi error, or the MIDI service taking less than the whole
+  message for 20 ms) drops the link and the next discovery opens its ports again (A1 left it dead while the device
+  stayed: the screen frozen, the keys dead). A link that has heard nothing from the unit for 6 s (12, 24 .. 60 s
+  after each try, back to 6 s once it talks) is closed and opened afresh, so a USB MIDI input that went quiet under
+  Android gets a new ALSA open. Every port open and close is logged (`RFMMidi`: index and direction), the first bytes
+  after the ports open and after each session start, and why a link went (`link gone: <name>: <why>`); every 5 s
+  `RFMLink` logs rx/tx bytes, PANEL_R and events (with the change), sessions, units lost, link drops and reopens.
+  Diagnostics › Link shows the same (rx bytes, the last event's age, PANEL_R, session restarts, port drops).
 - **USB**: `res/xml/device_filter.xml` (1209:0001) opens the app when the FM-1 is plugged in. MIDI over USB needs no
   USB permission (Android's MIDI service owns the device).
 - **Bluetooth**: the Bluetooth page scans for the BLE-MIDI service (03B80E5A-...), asks for BLUETOOTH_SCAN
@@ -172,6 +184,29 @@ v0.6.2's engine; the seven tests pass either way.)
   `MidiManager.openBluetoothDevice`, remembers it and reopens it at launch and after it drops (2, 5, 10, 20, 30 s).
 - **Background**: `PlaybackService`, a foreground service (mediaPlayback, plus connectedDevice when Bluetooth may be
   used) with the notification "RemoteFM1 is playing <core>" and Stop, while the FM-1 is the source or a core plays.
+
+## Audio output
+
+The Oboe stream is always opened on a device id, never on Android's default: once the FM-1 is plugged in, Android
+makes its USB audio the default output. The picker (main page, Audio output) offers Automatic (wired headphones,
+then Bluetooth, then other outputs, then the speaker; never USB), the speaker, headphones, Bluetooth and, when one is
+listed, the USB output. The pick is saved as a kind, except USB, which lasts until the app quits. A USB output is
+opened shared, on Android's mixer (performance mode None) with MMAP off; any other stream that Android routes to a
+USB output anyway is closed before it starts (`RFMAudio` logs where each stream really went: asked device, got
+device, API, sharing, performance mode, MMAP). Plugging the FM-1 in or out never moves the sound to or from it; when
+the picked output goes, the sound goes to Automatic's choice.
+
+## Known issues
+
+- **Galaxy Tab A9+ (SM-X210, Snapdragon, Android 16): sound to the FM-1's USB audio can restart the tablet.** In the
+  first FM-1 test (2026-11-01, build A1) Android routed the app's low-latency MMAP stream to the FM-1, the Qualcomm USB
+  audio offload started it (`uaudio`, `enable_audio_stream ... iface:3`) and 100 ms later the kernel hit an SMMU fault
+  in the audio DSP's memory (`msm-audio-ion`) and a fatal NoC error: the tablet rebooted. After the reboot, Android's
+  normal (mixer) path to the FM-1 failed instead: its audio HAL retried opening the USB output about 450 times a second
+  for 17 s (`AGM ... Connect failed error:-22`). So the app never sends sound to a USB output unless the user picks it
+  (with a warning on the row), and then the careful way (shared, no MMAP); whether that path is safe on this tablet
+  is not known. Other Samsung/Qualcomm devices may do the same. The FM-1's USB audio is not needed for anything else:
+  pick the tablet's speaker, headphones or Bluetooth.
 
 ## iOS → Android file map
 

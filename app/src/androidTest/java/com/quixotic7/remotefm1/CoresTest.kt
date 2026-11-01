@@ -423,7 +423,7 @@ class CoresTest {
             c.e.setClock(RfmEngine.CLOCK_TIMER)
             c.e.stopAudio(RfmEngine.CLOCK_TIMER)
             c.e.resetStats()
-            assertNull(c.e.startAudio(AudioRoute.device(dev, listOf(dev))))
+            assertNull(c.e.startAudio(dev))
             c.e.key(KEY_D4, false)
             c.e.key(KEY_D4, true, 100)
             SystemClock.sleep(800)

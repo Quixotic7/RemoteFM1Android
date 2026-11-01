@@ -434,6 +434,121 @@ class LinkTest {
         r.put("pass", true)
     }
 
+    // ---------------------------------------------------------------- what the first FM-1 test found (2026-11-01)
+    private fun virtualLink(): RfmLink {
+        val l = RfmLink(Backend.Device, virtualName = Fm1Candidate.VIRTUAL_NAME)
+        l.setPattern(false)
+        link = l
+        return l
+    }
+
+    private fun keyComesBack(svc: FakeFm1Service, l: RfmLink, k: Int): Boolean {
+        val after = l.events(0).lastOrNull()?.id ?: 0L
+        svc.fake().key(k, true)
+        val ok = until(3.0) { l.events(after).any { it.kind == PanelEvent.Kind.KEY && it.index == k && it.value == 1 } }
+        svc.fake().key(k, false)
+        return ok
+    }
+
+    /** the app killed (its SESSION 0 never reached the unit) and opened again while the unit keeps its session:
+     *  the new link finds it, starts a new session, and the unit's keys come back as events */
+    @Test
+    fun virtualRelaunchWhileTheUnitKeepsItsSession() {
+        name = "virtual_relaunch"
+        val svc = virtualService()
+        svc.dropIn = false
+        svc.muteOut = false
+        val l1 = virtualLink()
+        connect(10.0)
+        assertTrue("first link: keys", keyComesBack(svc, l1, 3))
+        val started0 = svc.fake().state().getInt("sessions_started")
+        svc.dropIn = true                                       // (SESSION 0 lost)
+        l1.close()
+        link = null
+        svc.dropIn = false
+        assertEquals("the unit kept its session", 1, svc.fake().state().getInt("session"))
+        val l2 = virtualLink()
+        r.put("reconnect_ms", connect(10.0))
+        assertTrue("a new SESSION", until(3.0) { svc.fake().state().getInt("sessions_started") > started0 })
+        assertTrue("second link: keys", keyComesBack(svc, l2, 4))
+        val st = status()
+        r.put("sessions_started", svc.fake().state().getInt("sessions_started")).put("rx_bytes", st.getInt("rx_bytes"))
+            .put("panel_r", st.getInt("panel_r")).put("pass", true)
+    }
+
+    /** RfmMidi sees the device twice (the device callback and a scan, two USB_DEVICE_ATTACHED rescans): one device
+     *  for the link, one port pair, keys come back */
+    @Test
+    fun virtualSeenTwiceIsOpenedOnce() {
+        name = "virtual_twice"
+        val svc = virtualService()
+        RfmMidi.start(ctx, Fm1Candidate.VIRTUAL_NAME)          // (a second scan of the same devices)
+        RfmMidi.start(ctx, Fm1Candidate.VIRTUAL_NAME)
+        val l = virtualLink()
+        connect(10.0)
+        l.rescan()
+        l.rescan()
+        SystemClock.sleep(500)
+        val devs = org.json.JSONArray(RfmMidi.nativeList())
+        val mine = (0 until devs.length()).map { devs.getJSONObject(it) }.filter { it.getString("name") == Fm1Candidate.VIRTUAL_NAME }
+        r.put("native_devices", mine.size).put("midi_links", status().getInt("midi_links"))
+        assertEquals("native devices: $devs", 1, mine.size)
+        assertEquals(1, status().getInt("midi_links"))
+        assertEquals(1, RfmMidi.entries().count { it.nativeId > 0 && it.desc.type == MidiDesc.TYPE_VIRTUAL })
+        assertTrue(keyComesBack(svc, l, 5))
+        r.put("pass", true)
+    }
+
+    /** a write the MIDI service does not take (A1: the session marked the link dead and nothing reopened it while the
+     *  device stayed: the screen frozen, the keys dead): the link is dropped and opened again, keys come back */
+    @Test
+    fun virtualFailedWriteReopensTheLink() {
+        name = "virtual_write_fail"
+        val svc = virtualService()
+        svc.dropIn = false
+        svc.muteOut = false
+        val l = virtualLink()
+        connect(10.0)
+        val sessions0 = status().getInt("sessions")
+        RfmMidi.testFailWrites(1)
+        assertTrue("the write failure seen: ${status()}", until(3.0) { status().getInt("write_fails") >= 1 })
+        val t0 = SystemClock.elapsedRealtime()
+        assertTrue("reconnected: ${status()}", until(10.0) {
+            status().getInt("state") == LinkState.CONNECTED && status().getInt("sessions") > sessions0
+        })
+        r.put("recover_ms", SystemClock.elapsedRealtime() - t0)
+        val st = status()
+        assertTrue(st.getInt("link_drops") >= 1)
+        assertEquals(1, st.getInt("midi_links"))
+        assertTrue("keys after the reopen", keyComesBack(svc, l, 6))
+        r.put("write_fails", st.getInt("write_fails")).put("link_drops", st.getInt("link_drops")).put("pass", true)
+    }
+
+    /** the unit's side goes quiet (no PANEL_R, nothing at all): the session looks for it again, and after ~6 s the
+     *  ports are opened afresh; once it talks again the session comes back and keys work */
+    @Test
+    fun virtualSilentInputIsReopened() {
+        name = "virtual_silent"
+        val svc = virtualService()
+        svc.dropIn = false
+        svc.muteOut = false
+        val l = virtualLink()
+        connect(10.0)
+        svc.muteOut = true
+        val t0 = SystemClock.elapsedRealtime()
+        assertTrue("unit lost", until(5.0) { status().getInt("state") != LinkState.CONNECTED })
+        r.put("lost_ms", SystemClock.elapsedRealtime() - t0)
+        assertTrue("ports reopened: ${status()}", until(15.0) { status().getInt("silent_reopens") >= 1 })
+        r.put("reopen_ms", SystemClock.elapsedRealtime() - t0)
+        svc.muteOut = false
+        assertTrue("back: ${status()}", until(10.0) { status().getInt("state") == LinkState.CONNECTED })
+        assertTrue("keys after silence", keyComesBack(svc, l, 8))
+        val st = status()
+        r.put("silent_reopens", st.getInt("silent_reopens")).put("lost", st.getInt("lost"))
+            .put("last_event_age_ms", st.getInt("last_event_age_ms")).put("pass", true)
+        assertTrue(st.getInt("last_event_age_ms") in 0..5000)
+    }
+
     companion object {
         const val TAG = "RFMLinkTest"
 

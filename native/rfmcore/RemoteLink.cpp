@@ -6,6 +6,8 @@
 // Remote FM-1: the session thread and the back ends (see RemoteLink.h).
 #include "RemoteLink.h"
 
+#include <android/log.h>
+
 #include <cstdio>
 #include <cstring>
 
@@ -101,6 +103,8 @@ RemoteLink::Status RemoteLink::status() const
     s.snapshotsTaken = snapshotsTaken_.load();
     s.fullResends = fullResends_.load();
     s.runs = runs_.load();
+    const uint32_t le = lastEventT_.load();
+    s.lastEventAgeMs = le ? (int32_t)(now() + 1 - le) : -1;
     return s;
 }
 
@@ -152,6 +156,11 @@ void RemoteLink::runOnce()
     wasConnected_ = false;
     statFrames_ = 0;
     statT_ = now();
+    logT_ = statT_;
+    logRx_ = logPanelR_ = 0;
+    logEvents_ = eventsIn_.load();
+    __android_log_print(ANDROID_LOG_INFO, "RFMLink", "link run %u starts (%s)", runs_.load(),
+                        fake_ ? "the fake unit in this process" : "Android MIDI devices");
     {
         std::lock_guard<std::mutex> g(fakeMu_);
         s_ = rfm_session_new(&sc, &cb);
@@ -168,7 +177,7 @@ void RemoteLink::runOnce()
         rfm_android_cfg_t ac{};
         char err[200] = "";
         ac.virtual_name = opt_.virtualName.c_str();
-        ac.log = [](void *ctx, const char *m) { cbLog(ctx, m); };
+        ac.log = [](void *ctx, const char *m) { cbNote(ctx, m); };   // (rfm_android logs under RFMMidi itself)
         ac.log_ctx = this;
         and_ = rfm_android_new(&ac, err, sizeof err);
         if (!and_) {
@@ -252,6 +261,7 @@ void RemoteLink::runOnce()
         std::lock_guard<std::mutex> g(stMu_);
         st_.midiLinks = 0;
     }
+    __android_log_print(ANDROID_LOG_INFO, "RFMLink", "link run %u ended (the app stopped the link)", runs_.load());
     setStatus(kOff, "off");
 }
 
@@ -303,6 +313,29 @@ void RemoteLink::updateStatus(uint32_t t)
     st_.txBytes = as.tx_bytes;
     st_.txShort = as.tx_short;
     st_.frameLinkName = linkName;
+    st_.panelR = ss.panel_r;
+    st_.lost = ss.lost;
+    st_.decodeErrs = ss.decode_errs;
+    st_.linkDrops = as.link_drops;
+    st_.silentReopens = as.silent_reopens;
+    st_.writeFails = as.write_fails;
+    st_.rxErrors = as.rx_errors;
+    // every 5 s, the numbers that tell a silent unit from a deaf host (logcat RFMLink)
+    if (t - logT_ >= 5000u) {
+        const uint32_t ev = eventsIn_.load();
+        __android_log_print(ANDROID_LOG_INFO, "RFMLink",
+                            "5 s: %s; rx %u B (+%u), tx %u B, PANEL_R %u (+%u), events %u (+%u), frames %u, acks %u, "
+                            "sessions %u, lost %u, decode errors %u, links %u, link drops %u, silent reopens %u, "
+                            "write fails %u, read errors %u",
+                            rfm_session_state_name(state), as.rx_bytes, as.rx_bytes - logRx_, as.tx_bytes, ss.panel_r,
+                            ss.panel_r - logPanelR_, ev, ev - logEvents_, ss.frames, ss.acks, ss.sessions, ss.lost,
+                            ss.decode_errs, fake_ ? 1u : as.midi_links, as.link_drops, as.silent_reopens,
+                            as.write_fails, as.rx_errors);
+        logT_ = t;
+        logRx_ = as.rx_bytes;
+        logPanelR_ = ss.panel_r;
+        logEvents_ = ev;
+    }
     if (const rfm_hello_t *h = rfm_session_hello(s_); h && h->name[0]) {
         st_.hello = *h;
         st_.haveHello = true;
@@ -372,6 +405,7 @@ void RemoteLink::cbEvent(void *ctx, const rfm_event_t *e)
 {
     RemoteLink *self = static_cast<RemoteLink *>(ctx);
     self->eventsIn_.fetch_add(1);
+    self->lastEventT_.store(self->now() + 1);
     if (!self->q_.push(*e))
         self->eventsDropped_.fetch_add(1);
 }
@@ -398,8 +432,19 @@ void RemoteLink::cbState(void *ctx, int st, const char *why)
     RemoteLink *self = static_cast<RemoteLink *>(ctx);
     if (self->lastState_ == RFM_S_ACTIVE && st != RFM_S_ACTIVE)
         self->releasePanel();                    // (the session ended or the unit went away)
-    if (st == RFM_S_ACTIVE)
+    if (st == RFM_S_STARTING && self->s_) {
+        // HELLO_R: `session 1` = the unit still had a session (a USB reset or a host restart; the FM-1 itself kept
+        // running), `session 0` = it had none (it booted, or its keepalive ran out)
+        if (const rfm_hello_t *h = rfm_session_hello(self->s_); h && h->name[0])
+            __android_log_print(ANDROID_LOG_INFO, "RFMLink", "unit found: %s %s (firmware %s, id %s), its session %d, "
+                                "caps 0x%x, sxq %u", h->name, h->ver, h->fw_ver, h->identity, (int)h->session,
+                                (unsigned)h->caps, (unsigned)h->sxq);
+    }
+    if (st == RFM_S_ACTIVE) {
         self->wasConnected_ = true;
+        if (self->and_)
+            rfm_android_log_next_rx(self->and_, "after the session started");
+    }
     self->lastState_ = st;
     char b[200];
     std::snprintf(b, sizeof b, "session: %s (%s)", rfm_session_state_name(st), why ? why : "");
@@ -414,6 +459,12 @@ void RemoteLink::cbRescan(void *ctx)
 }
 
 void RemoteLink::cbLog(void *ctx, const char *m)
+{
+    __android_log_print(ANDROID_LOG_INFO, "RFMLink", "%s", m ? m : "");
+    cbNote(ctx, m);
+}
+
+void RemoteLink::cbNote(void *ctx, const char *m)
 {
     RemoteLink *self = static_cast<RemoteLink *>(ctx);
     std::lock_guard<std::mutex> g(self->stMu_);

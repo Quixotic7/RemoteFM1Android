@@ -3,8 +3,11 @@
 // Ported in part from RemoteFM1IOS 0d1a98b RFMKit/Sources/RFMKit/AudioRoute.swift (the route's name, the USB hint,
 // what a route change asks of the engine) and CorePlayer.swift (audioConfigurationChanged: a new stream at the new
 // rate). Android has no system route picker, so the app lists AudioManager's outputs and opens the Oboe stream on
-// the one picked (its device id; 0: the system default). With the FM-1 on USB it is also a USB sound card and
-// Android may send the sound there; the picker chooses the tablet's speaker or headphones instead.
+// the one picked, always by its device id: Android's own default would be the FM-1's USB audio as soon as it is
+// plugged in, and sound to it over the Qualcomm USB offload restarted a Galaxy Tab A9+ (README "Known issues"). So:
+// the sound never goes to a USB output unless the user picked it (then shared, no MMAP); the pick is kept as a kind
+// (speaker, headphones, Bluetooth; USB only until the app quits); plugging the FM-1 in or out never moves the sound
+// to or from it; when the picked output goes, the sound goes to the speaker (or headphones, Bluetooth).
 package com.quixotic7.remotefm1
 
 import android.content.Context
@@ -18,6 +21,15 @@ import android.util.Log
 /** One output Android offers. */
 data class AudioOut(val id: Int, val name: String, val type: Int) {
     val usb: Boolean get() = type in USB_TYPES
+    /** what the picker remembers: [AudioRoute.SPEAKER], HEADPHONES, BLUETOOTH, USB, OTHER */
+    val pickKind: String get() = when (type) {
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> AudioRoute.SPEAKER
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET -> AudioRoute.HEADPHONES
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER,
+        AudioDeviceInfo.TYPE_BLE_BROADCAST -> AudioRoute.BLUETOOTH
+        in USB_TYPES -> AudioRoute.USB
+        else -> AudioRoute.OTHER
+    }
     val kind: String get() = when (type) {
         AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "speaker"
         AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET -> "wired"
@@ -50,28 +62,66 @@ data class AudioOut(val id: Int, val name: String, val type: Int) {
 object AudioRoute {
     enum class Action { NONE, RENAME, RESTART }
 
+    const val AUTO = "auto"
+    const val SPEAKER = "speaker"
+    const val HEADPHONES = "headphones"
+    const val BLUETOOTH = "bluetooth"
+    const val USB = "usb"
+    const val OTHER = "other"
+
+    /** the warning on the USB row (the owner's Galaxy Tab A9+ restarted) */
+    const val USB_WARNING = "Some Samsung tablets restart when sound goes to the FM-1 over USB."
+
+    /** the picks the picker offers: Automatic, then each kind Android lists now (USB last) */
+    fun kinds(outs: List<AudioOut>): List<String> =
+        listOf(AUTO) + listOf(SPEAKER, HEADPHONES, BLUETOOTH, OTHER, USB).filter { k -> outs.any { it.pickKind == k } }
+
+    /** the picker's chip for a kind: "Speaker", "FM-1 (USB)", "Galaxy Buds (Bluetooth)" */
+    fun kindTitle(outs: List<AudioOut>, kind: String): String = when (kind) {
+        AUTO -> "Automatic"
+        SPEAKER -> "Speaker"
+        else -> outs.firstOrNull { it.pickKind == kind }?.title ?: kind
+    }
+
+    /** what is saved: the kind, but never USB (a relaunch after a restart must not play to the FM-1 again) */
+    fun saved(kind: String): String = if (kind == USB) AUTO else kind
+
     /**
-     * After an output came or went: nothing while the sound is off; the stream reopened when it died (a disconnect)
-     * or the device it was asked to play on is gone (then on the default); else only the names read again.
+     * The output to play on for the pick [kind]: that kind's device while Android lists it; otherwise (and for
+     * Automatic) the first of wired headphones, Bluetooth, other non-USB outputs, the speaker. A USB output only
+     * when [kind] is USB. Null: nothing but USB outputs, and USB not picked (the sound stays off).
      */
-    fun action(soundOn: Boolean, streamOpen: Boolean, streamDead: Boolean, requested: Int, present: Collection<Int>): Action {
+    fun choose(outs: List<AudioOut>, kind: String): AudioOut? {
+        if (kind == USB) outs.firstOrNull { it.usb }?.let { return it }
+        if (kind != AUTO && kind != USB) outs.firstOrNull { !it.usb && it.pickKind == kind }?.let { return it }
+        return listOf(HEADPHONES, BLUETOOTH, OTHER, SPEAKER).firstNotNullOfOrNull { k -> outs.firstOrNull { !it.usb && it.pickKind == k } }
+    }
+
+    /** the outputs the stream must not land on: every USB output but the one chosen */
+    fun forbidden(outs: List<AudioOut>, chosen: AudioOut?): IntArray =
+        outs.filter { it.usb && it.id != chosen?.id }.map { it.id }.toIntArray()
+
+    /**
+     * After an output came or went, or the stream died: nothing while the sound is off; a new stream when it died,
+     * never ran, or its device is gone; a move between the non-USB outputs when the pick says so (headphones plugged
+     * in with Automatic); never to or from a USB output by itself (the FM-1 plugged in or out). Else only the names.
+     */
+    fun action(soundOn: Boolean, streamOpen: Boolean, streamDead: Boolean, playingOn: Int, outs: List<AudioOut>,
+               chosen: AudioOut?): Action {
         if (!soundOn) return Action.NONE
         if (!streamOpen || streamDead) return Action.RESTART
-        if (requested != 0 && requested !in present) return Action.RESTART
+        val now = outs.firstOrNull { it.id == playingOn } ?: return Action.RESTART
+        if (chosen != null && !chosen.usb && !now.usb && chosen.id != now.id) return Action.RESTART
         return Action.RENAME
     }
 
-    /** the device to ask for: the picked one while Android still offers it, else the default (0) */
-    fun device(requested: Int, present: Collection<Int>): Int = if (requested != 0 && requested in present) requested else 0
-
-    /** the row's value: the stream's device, or what the picker asked for */
+    /** the row's value: the stream's device */
     fun name(outs: List<AudioOut>, playingOn: Int): String =
-        outs.firstOrNull { it.id == playingOn }?.title ?: if (playingOn > 0) "device $playingOn" else "System default"
+        outs.firstOrNull { it.id == playingOn }?.title ?: if (playingOn > 0) "device $playingOn" else "nothing"
 
-    /** a hint under the row when the sound goes to a USB sound card (the FM-1) */
+    /** a note under the row when the sound goes to a USB sound card (the FM-1) */
     fun hint(outs: List<AudioOut>, playingOn: Int): String? =
-        if (outs.firstOrNull { it.id == playingOn }?.usb == true)
-            "The sound goes out of the FM-1's USB audio. Pick Audio output for the tablet's speaker or headphones."
+        if (outs.firstOrNull { it.id == playingOn }?.usb == true) "The sound goes out of the FM-1's USB audio. $USB_WARNING"
         else null
 }
 

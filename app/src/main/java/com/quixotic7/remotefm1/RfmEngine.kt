@@ -52,8 +52,13 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
     /** Note key 0..26 down or up, as the FM-1 sends it; [vel] 1..127, 0 the default. */
     fun key(key: Int, down: Boolean, vel: Int = 0): Boolean = nativeKey(handle, key, down, vel)
 
-    /** Starts the Oboe stream ([deviceId] 0: the default output); null on success, else the error. */
-    fun startAudio(deviceId: Int = 0): String? = nativeStartAudio(handle, deviceId).ifEmpty { null }
+    /**
+     * Starts the Oboe stream on [deviceId] (0: Android's default, which the app never asks for: with an FM-1 on USB
+     * that is the FM-1). [usbSafe]: a USB output the user picked (shared, no MMAP). [forbidden]: outputs it must not
+     * end up on (the USB ones not picked; closed before a sample plays). Null on success, else the error.
+     */
+    fun startAudio(deviceId: Int = 0, usbSafe: Boolean = false, forbidden: IntArray = IntArray(0)): String? =
+        nativeStartAudio(handle, deviceId, usbSafe, forbidden).ifEmpty { null }
 
     fun stopAudio(clockAfter: Int = CLOCK_TIMER) = nativeStopAudio(handle, clockAfter)
 
@@ -165,7 +170,7 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         @JvmStatic private external fun nativeBoot(h: Long, flash: ByteArray?): Boolean
         @JvmStatic private external fun nativeSetClock(h: Long, owner: Int)
         @JvmStatic private external fun nativeKey(h: Long, key: Int, down: Boolean, vel: Int): Boolean
-        @JvmStatic private external fun nativeStartAudio(h: Long, device: Int): String
+        @JvmStatic private external fun nativeStartAudio(h: Long, device: Int, usbSafe: Boolean, forbidden: IntArray): String
         @JvmStatic private external fun nativeStopAudio(h: Long, clockAfter: Int)
         @JvmStatic private external fun nativeStatus(h: Long): String
         @JvmStatic private external fun nativeResetStats(h: Long)

@@ -36,6 +36,7 @@ data class LaunchOptions(
     val mode: String? = null,           // "pattern" / "core"
     val core: String? = null,           // a core id
     val sound: Boolean? = null,
+    val output: String? = null,         // an audio output kind (AudioRoute.AUTO, SPEAKER, .., USB)
 ) {
     val backend: Backend get() = if (fake || fakeBle) Backend.Fake(fakeBle) else Backend.Device
 
@@ -47,6 +48,7 @@ data class LaunchOptions(
                 fake = flag("fake"), fakeBle = flag("fakeble"), virtual = flag("virtual"),
                 source = extras.getString("source"), mode = extras.getString("mode"), core = extras.getString("core"),
                 sound = if (extras.containsKey("sound")) flag("sound") else null,
+                output = extras.getString("output"),
             )
         }
     }
@@ -99,8 +101,8 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         private set
     var message by mutableStateOf("")
         private set
-    /** the output picked (an AudioDeviceInfo id; 0: the system default) */
-    var requestedOutput by mutableIntStateOf(0)
+    /** the output picked, as a kind (AudioRoute.AUTO, SPEAKER, HEADPHONES, BLUETOOTH, USB); USB is never saved */
+    var outputPick by mutableStateOf(AudioRoute.AUTO)
         private set
     var outputList by mutableStateOf<List<AudioOut>>(emptyList())
         private set
@@ -136,6 +138,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         if (wanted != null && wanted != selected) fallbackNote = "$wanted is not in this build: ${nameOf(selected)} instead"
         if (options.core != null) prefs.edit().putString(KEY_CORE, selected).apply()     // (a launch extra is remembered too)
         outputList = outputs.list
+        outputPick = prefs.getString(KEY_OUTPUT, AudioRoute.AUTO)?.takeIf { it != AudioRoute.USB } ?: AudioRoute.AUTO
         engine.setMidi()
         enableVirtual(options.virtual)                      // (listed to other apps only when asked for)
         RfmMidi.start(ctx, link.let { if (options.virtual) Fm1Candidate.VIRTUAL_NAME else "" })
@@ -153,12 +156,14 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
             else -> if (prefs.getString(KEY_MODE, "pattern") == "core") Mode.CORE else Mode.PATTERN
         }
         useMode(m)
+        options.output?.let { chooseOutput(it) }
         options.sound?.let { setSound(it) }
         tick()
     }
 
     // ---------------------------------------------------------------- control (the main thread)
     fun useSource(s: Source) {
+        if (s != source) Log.i(TAG, "user: Sound source ${if (s == Source.FM1) "FM-1" else "this tablet (the link stops)"}")
         source = s
         prefs.edit().putString(KEY_SOURCE, if (s == Source.FM1) "fm1" else "tablet").apply()
         if (s == Source.FM1) link.start() else link.stop()
@@ -167,6 +172,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     }
 
     fun useMode(m: Mode) {
+        Log.i(TAG, "mode: ${if (m == Mode.CORE) "firmware core $selected" else "test pattern"}")
         if (m == Mode.CORE) {
             if (!bootSelected()) {
                 mode = Mode.PATTERN
@@ -203,6 +209,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     }
 
     fun setSound(on: Boolean) {
+        Log.i(TAG, "user: sound ${if (on) "on" else "off"} (output pick $outputPick)")
         soundOn = on
         if (mode == Mode.CORE) applyClock()
         playingChanged()
@@ -214,6 +221,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     }
 
     fun restartLink() {
+        Log.i(TAG, "user: Restart link")
         link.stop()
         if (source == Source.FM1) link.start()
     }
@@ -239,21 +247,25 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         }
     }
 
-    /** the output to play on (0: the system default); the stream reopened on it when the sound is on */
-    fun chooseOutput(id: Int) {
-        requestedOutput = id
+    /** the output to play on, as a kind (AudioRoute.*); the stream reopened on it when the sound is on */
+    fun chooseOutput(kind: String) {
+        Log.i(TAG, "user: audio output $kind")
+        outputPick = kind
+        prefs.edit().putString(KEY_OUTPUT, AudioRoute.saved(kind)).apply()
         if (mode == Mode.CORE && soundOn) restartAudio("output picked")
     }
 
     private fun outputsChanged(list: List<AudioOut>) {
         outputList = list
         routeChanges++
+        if (outputPick == AudioRoute.USB && list.none { it.usb }) {
+            outputPick = AudioRoute.AUTO                        // (the picked FM-1 went: never back to it by itself)
+            Log.i(TAG, "audio: the picked USB output went away; the pick is Automatic again")
+        }
         val a = engine.status().getJSONObject("audio")
-        val present = list.map { it.id }
-        if (requestedOutput != 0 && requestedOutput !in present) requestedOutput = 0
         when (AudioRoute.action(mode == Mode.CORE && soundOn, a.optInt("open") != 0, a.optInt("dead") != 0,
-                                a.optInt("requested_device"), present)) {
-            AudioRoute.Action.RESTART -> restartAudio("output gone")
+                                a.optInt("device_id"), list, AudioRoute.choose(list, outputPick))) {
+            AudioRoute.Action.RESTART -> restartAudio("outputs changed")
             else -> {}
         }
     }
@@ -292,11 +304,18 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
 
     private fun applyClock() {
         if (soundOn) {
-            val present = outputs.list.map { it.id }
-            val dev = AudioRoute.device(requestedOutput, present)
-            var err = engine.startAudio(dev)
-            if (err != null && dev != 0) err = engine.startAudio(0)     // (the picked one refused: the default)
+            val list = outputs.list
+            var out = AudioRoute.choose(list, outputPick)
+            var err = if (out == null) "no output but USB (pick the FM-1's USB audio to use it)" else startOn(out, list)
+            if (err != null && out != null && outputPick != AudioRoute.AUTO) {   // (the picked one refused: Automatic)
+                val auto = AudioRoute.choose(list, AudioRoute.AUTO)
+                if (auto != null && auto.id != out.id) {
+                    out = auto
+                    err = startOn(auto, list)
+                }
+            }
             if (err != null) {
+                Log.w(TAG, "audio: $err")
                 message = "sound: $err"
                 soundOn = false
                 engine.setClock(RfmEngine.CLOCK_TIMER)
@@ -305,6 +324,17 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
             stopAudio()
             engine.setClock(RfmEngine.CLOCK_TIMER)
         }
+    }
+
+    // a stream on [out] (by its id, never Android's default), the careful way for a USB output; every other USB output
+    // forbidden. Logs where it really went.
+    private fun startOn(out: AudioOut, list: List<AudioOut>): String? {
+        val err = engine.startAudio(out.id, usbSafe = out.usb, forbidden = AudioRoute.forbidden(list, out))
+        val a = engine.status().getJSONObject("audio")
+        Log.i(TAG, "audio: asked ${out.title} (device ${out.id}${if (out.usb) ", USB: shared, no MMAP" else ""}); " +
+            if (err != null) "failed: $err" else "playing on device ${a.optInt("device_id")}, ${a.optString("api")} " +
+                "${a.optString("sharing")}, performance ${a.optInt("performance")}, MMAP ${a.optInt("mmap")}")
+        return err
     }
 
     private fun stopAudio() {
@@ -413,7 +443,13 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         if (mode == Mode.CORE && booted != null) {
             flash.refresh(engineStatus)?.let { message = it }
             val a = engineStatus.getJSONObject("audio")
-            if (soundOn && a.optInt("open") != 0 && a.optInt("dead") != 0) restartAudio("stream disconnected")
+            if (soundOn && a.optInt("open") != 0 && a.optInt("dead") != 0) {
+                if (outputPick == AudioRoute.USB && outputList.firstOrNull { it.id == a.optInt("device_id") }?.usb == true) {
+                    outputPick = AudioRoute.AUTO                // (the FM-1's audio dropped: not again by itself)
+                    message = "The FM-1's USB audio stopped: the sound is on ${AudioRoute.choose(outputList, AudioRoute.AUTO)?.title ?: "nothing"} now."
+                }
+                restartAudio("stream disconnected")
+            }
         }
         // the screen being sent: the core's in Core mode, the link's pattern otherwise
         val seq: Int
@@ -460,6 +496,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         private const val KEY_SOURCE = "source"
         private const val KEY_MODE = "mode"
         private const val KEY_BLE = "ble_address"
+        private const val KEY_OUTPUT = "audio_output"
         /** the cores' order in the picker (RemoteFM1IOS CorePlayer.order) */
         val ORDER = listOf("choralroot", "felucca", "melodee", "fizz", "saadet", "boardwalk", "loom")
 

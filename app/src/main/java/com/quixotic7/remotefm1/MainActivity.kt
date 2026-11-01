@@ -136,8 +136,8 @@ class MainActivity : ComponentActivity() {
             }
             Label("Sound source")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(m.source == Source.TABLET, { m.useSource(Source.TABLET) }, { Text("This tablet (no link)") })
-                FilterChip(m.source == Source.FM1, { askNotifications(); m.useSource(Source.FM1) }, { Text("FM-1") })
+                FilterChip(m.source == Source.TABLET, { m.useSource(Source.TABLET) }, { Text("This tablet · play by touch, FM-1 unused") })
+                FilterChip(m.source == Source.FM1, { askNotifications(); m.useSource(Source.FM1) }, { Text("FM-1 · its keys and screen") })
             }
             Label("Mode")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -165,11 +165,11 @@ class MainActivity : ComponentActivity() {
             }
             Label("Audio output")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(m.requestedOutput == 0, { m.chooseOutput(0) }, { Text("System default") })
-                m.outputList.forEach { o ->
-                    FilterChip(m.requestedOutput == o.id, { m.chooseOutput(o.id) }, { Text(o.title) })
+                AudioRoute.kinds(m.outputList).forEach { k ->
+                    FilterChip(m.outputPick == k, { m.chooseOutput(k) }, { Text(AudioRoute.kindTitle(m.outputList, k)) })
                 }
             }
+            if (m.outputList.any { it.usb }) Text(AudioRoute.USB_WARNING, fontSize = 12.sp, color = Theme.accent)
             if (m.mode == Mode.CORE && m.soundOn) {
                 Text("Playing on " + AudioRoute.name(m.outputList, m.playingOn), fontSize = 12.sp, color = Theme.dim)
                 AudioRoute.hint(m.outputList, m.playingOn)?.let { Text(it, fontSize = 12.sp, color = Theme.teal) }
@@ -265,10 +265,13 @@ class MainActivity : ComponentActivity() {
                 "ble" to if (s.ble) "1, HOLD ${if (s.hold) "on" else "off"}" else "0",
                 "held" to "${s.held}, reduced ${s.reduced}, refined ${s.refined}",
                 "sessions" to "${s.sessions}, discoveries ${s.discoveries}, runs ${s.runs}",
-                "events" to "${s.eventsIn}, dropped ${s.eventsDropped}",
+                "events" to "${s.eventsIn}, dropped ${s.eventsDropped}, last " +
+                    if (s.lastEventAgeMs < 0) "none" else "%.1f s ago".format(s.lastEventAgeMs / 1000.0),
+                "PANEL_R" to "${s.panelR} heard, units lost ${s.lost}, session restarts ${maxOf(0L, s.sessions - 1)}, decode errors ${s.decodeErrs}",
                 "touch" to s.touchText(model.hello),
                 "TRS MIDI in" to "${s.trsMidiIn}" + if (s.trsMidiDropped > 0) ", dropped ${s.trsMidiDropped}" else "",
-                "Android MIDI" to "${s.midiLinks} links, in ${s.rxBytes} B, out ${s.txBytes} B, short writes ${s.txShort}",
+                "Android MIDI" to "${s.midiLinks} links, rx ${s.rxBytes} B, tx ${s.txBytes} B, short writes ${s.txShort}",
+                "port drops" to "${s.linkDrops} (silent reopens ${s.silentReopens}, write fails ${s.writeFails}, read errors ${s.rxErrors})",
                 "MIDI setup" to "${RfmMidi.changes} changes",
             ))
             if (model.lastLog.isNotEmpty()) Mono(model.lastLog, Theme.dim, 11)
@@ -313,8 +316,9 @@ class MainActivity : ComponentActivity() {
                     "${a.optString("api")} ${a.optInt("rate")} Hz x${a.optInt("channels")}, ${a.optString("sharing")}" +
                         if (a.optInt("performance") == 12) ", low latency" else ""
                 else if (a != null && a.optInt("dead") != 0) "disconnected: reopening" else "off",
-                "output" to AudioRoute.name(model.outputList, model.playingOn) +
-                    (if (model.requestedOutput != 0) " (picked)" else " (default)") + ", device ${model.playingOn}",
+                "output" to AudioRoute.name(model.outputList, model.playingOn) + " (pick: ${AudioRoute.kindTitle(model.outputList, model.outputPick)})" +
+                    ", device ${model.playingOn}" + if (a != null && a.optInt("open") != 0)
+                        ", MMAP ${a.optInt("mmap")}" + if (a.optInt("usb_safe") != 0) ", USB careful mode" else "" else "",
                 "stream" to if (a != null && a.optInt("open") != 0)
                     "burst ${a.optInt("frames_per_burst")}, buffer ${a.optInt("buffer_size")}/${a.optInt("buffer_capacity")}, " +
                         "latency ${a.optDouble("latency_ms").let { if (it.isNaN() || it < 0) "?" else "%.1f ms".format(it) }}"

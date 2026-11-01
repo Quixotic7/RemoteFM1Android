@@ -92,6 +92,8 @@ object RfmMidi {
     /** A candidate is open and handed to the link (any thread). */
     fun linked(): Boolean = entries().any { it.nativeId > 0 }
 
+    private fun linked(id: Int): Boolean = synchronized(entries) { (entries[id]?.nativeId ?: -1) > 0 }
+
     fun linkedBluetooth(address: String): Boolean = entries().any { it.nativeId > 0 && it.desc.btAddress == address }
 
     private fun scanAll() {
@@ -143,7 +145,10 @@ object RfmMidi {
 
     // (the handler thread)
     private fun consider(info: MidiDeviceInfo) {
-        if (synchronized(entries) { entries[info.id]?.let { it.nativeId > 0 || it.opening } } == true) return
+        if (synchronized(entries) { entries[info.id]?.let { it.nativeId > 0 || it.opening } } == true) {
+            Log.i(TAG, "#${info.id}: seen again, already ${if (linked(info.id)) "handed to the link" else "being opened"}")
+            return
+        }
         val d = describe(info)
         val c = Fm1Candidate.check(d, virtualName)
         Log.i(TAG, "#${d.id} ${d.displayName}: ${if (c.candidate) "candidate" else "not a candidate"} (${c.why})")
@@ -181,7 +186,8 @@ object RfmMidi {
             put(id, Entry(d, c, error = "AMidi could not take it"))
             return
         }
-        Log.i(TAG, "#$id ${d.displayName}: handed to the link (native $nid, in ${c.inPort} out ${c.outPort})")
+        Log.i(TAG, "#$id ${d.displayName}: handed to the link (native $nid; input port ${c.inPort} we send to, " +
+            "output port ${c.outPort} we read)")
         put(id, Entry(d, c, nativeId = nid))
     }
 
@@ -260,5 +266,9 @@ object RfmMidi {
     @JvmStatic private external fun nativeAddDevice(device: MidiDevice, name: String, transport: Int, inPort: Int,
                                                     outPort: Int, virtualName: String): Int
     @JvmStatic private external fun nativeRemoveDevice(id: Int)
+    @JvmStatic private external fun nativeTestFailWrites(n: Int)
+
+    /** tests: the next [n] writes to any MIDI link fail (as a MIDI service that stopped taking bytes) */
+    fun testFailWrites(n: Int) = nativeTestFailWrites(n)
     @JvmStatic private external fun nativeDevices(): String
 }

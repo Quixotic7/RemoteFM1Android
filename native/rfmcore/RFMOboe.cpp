@@ -4,7 +4,9 @@
 // allocated there), interleaved into Oboe's buffer, the level measured. No locks, no waits.
 #include "RFMOboe.h"
 
+#include <android/log.h>
 #include <oboe/Oboe.h>
+#include <oboe/OboeExtensions.h>
 
 #include <atomic>
 #include <cmath>
@@ -97,6 +99,8 @@ struct rfmo {
     std::shared_ptr<oboe::AudioStream> stream;
     int32_t lastError = 0;
     int32_t requested = 0;
+    int usbSafe = 0;                    // the stream was opened the careful way (a USB output the user picked)
+    int mmap = -1;                      // the stream uses MMAP (OboeExtensions::isMMapUsed; -1 unknown)
     uint32_t disconnectsBefore = 0;     // (kept across reopens: the count is the session's)
     char error[96] = {};
 };
@@ -124,7 +128,8 @@ void rfmo_free(rfmo_t *o)
     delete o;
 }
 
-int rfmo_start(rfmo_t *o, int32_t device_id, char *err, uint32_t n)
+int rfmo_start(rfmo_t *o, int32_t device_id, int usb_safe, const int32_t *forbidden, int n_forbidden, char *err,
+               uint32_t n)
 {
     if (o->stream) {
         putErr(err, n, "already playing");
@@ -134,29 +139,68 @@ int rfmo_start(rfmo_t *o, int32_t device_id, char *err, uint32_t n)
         o->disconnectsBefore += o->cb->disconnects_.load();
     o->cb = std::make_shared<Output>(o->e);
     o->requested = device_id;
+    o->usbSafe = usb_safe;
+    o->mmap = -1;
     oboe::AudioStreamBuilder b;
     b.setDirection(oboe::Direction::Output)
-        ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-        ->setSharingMode(oboe::SharingMode::Exclusive)
         ->setFormat(oboe::AudioFormat::Float)
         ->setChannelCount(oboe::ChannelCount::Stereo)
         ->setUsage(oboe::Usage::Media)
         ->setContentType(oboe::ContentType::Music)
         ->setDataCallback(o->cb)
         ->setErrorCallback(o->cb);
+    if (usb_safe) {
+        // a USB sound card (the FM-1's): Android's mixer, no MMAP, no exclusive stream (MMAP to the FM-1 through the
+        // Qualcomm USB offload restarted a Galaxy Tab A9+; README "Known issues")
+        b.setPerformanceMode(oboe::PerformanceMode::None)->setSharingMode(oboe::SharingMode::Shared);
+    } else {
+        b.setPerformanceMode(oboe::PerformanceMode::LowLatency)->setSharingMode(oboe::SharingMode::Exclusive);
+    }
     if (device_id > 0)
         b.setDeviceId(device_id);
+    const bool mmapWas = oboe::OboeExtensions::isMMapEnabled();
+    if (usb_safe && mmapWas) {
+        const int32_t r = oboe::OboeExtensions::setMMapEnabled(false);
+        __android_log_print(ANDROID_LOG_INFO, "RFMAudio", "MMAP off for this stream: %d", (int)r);
+    }
     oboe::Result r = b.openStream(o->stream);
+    if (usb_safe && mmapWas)
+        oboe::OboeExtensions::setMMapEnabled(true);
     if (r != oboe::Result::OK) {
         o->lastError = (int32_t)r;
         std::snprintf(o->error, sizeof o->error, "openStream: %s", oboe::convertToText(r));
         putErr(err, n, o->error);
+        __android_log_print(ANDROID_LOG_WARN, "RFMAudio", "open on device %d failed: %s", (int)device_id,
+                            oboe::convertToText(r));
         o->stream.reset();
         o->cb.reset();
         return 0;
     }
-    // two bursts of buffering (Oboe's low-latency advice); the engine's ring sits in front of it
-    o->stream->setBufferSizeInFrames(o->stream->getFramesPerBurst() * 2);
+    // where it really goes: never a USB output the user did not pick (closed before a sample is played)
+    const int32_t got = o->stream->getDeviceId();
+    o->mmap = oboe::OboeExtensions::isMMapUsed(o->stream.get()) ? 1 : 0;
+    __android_log_print(ANDROID_LOG_INFO, "RFMAudio",
+                        "stream open: asked device %d, got device %d, %s, %s, performance %d, MMAP %d, %d Hz, burst %d",
+                        (int)device_id, (int)got, o->stream->getAudioApi() == oboe::AudioApi::AAudio ? "AAudio" : "OpenSL ES",
+                        o->stream->getSharingMode() == oboe::SharingMode::Exclusive ? "exclusive" : "shared",
+                        (int)o->stream->getPerformanceMode(), o->mmap, (int)o->stream->getSampleRate(),
+                        (int)o->stream->getFramesPerBurst());
+    for (int i = 0; i < n_forbidden; i++) {
+        if (forbidden[i] > 0 && forbidden[i] == got) {
+            std::snprintf(o->error, sizeof o->error, "the stream went to USB output %d, not picked: closed", (int)got);
+            putErr(err, n, o->error);
+            __android_log_print(ANDROID_LOG_WARN, "RFMAudio", "%s", o->error);
+            o->lastError = (int32_t)oboe::Result::ErrorInvalidState;
+            o->stream->close();
+            o->stream.reset();
+            o->cb.reset();
+            return 0;
+        }
+    }
+    // two bursts of buffering (Oboe's low-latency advice); the engine's ring sits in front of it. (The careful
+    // stream keeps the size Android gave it.)
+    if (!usb_safe)
+        o->stream->setBufferSizeInFrames(o->stream->getFramesPerBurst() * 2);
     rfme_set_clock(o->e, RFME_CLOCK_AUDIO);
     r = o->stream->requestStart();
     if (r != oboe::Result::OK) {
@@ -197,6 +241,8 @@ void rfmo_status(rfmo_t *o, rfmo_status_t *st)
     std::memset(st, 0, sizeof *st);
     st->last_error = o->lastError;
     st->requested_device = o->requested;
+    st->usb_safe = o->usbSafe;
+    st->mmap = o->mmap;
     st->latency_ms = -1;
     st->disconnects = o->disconnectsBefore;
     std::snprintf(st->error, sizeof st->error, "%s", o->error);

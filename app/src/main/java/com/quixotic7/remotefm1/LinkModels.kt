@@ -116,6 +116,10 @@ data class LinkStats(
     // Android: MIDI port pairs open, bytes in and out through AMidi, writes the MIDI service took short, the frame link
     val midiLinks: Long = 0, val rxBytes: Long = 0, val txBytes: Long = 0, val txShort: Long = 0,
     val frameLink: String = "",
+    // PANEL_R heard, units lost, undecodable messages; links let go, reopened for silence, failed writes and reads;
+    // ms since the last panel event (-1: none)
+    val panelR: Long = 0, val lost: Long = 0, val decodeErrs: Long = 0, val linkDrops: Long = 0,
+    val silentReopens: Long = 0, val writeFails: Long = 0, val rxErrors: Long = 0, val lastEventAgeMs: Long = -1,
 ) {
     fun touchText(hello: UnitHello?): String = touchText(hello?.caps, touchWanted, touch, touchSent)
 

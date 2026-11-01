@@ -25,10 +25,14 @@ class FakeFm1Service : MidiDeviceService() {
         private set
     @Volatile var outMax = 0
         private set
+    /** tests: nothing the unit says reaches the host (its USB MIDI input gone quiet) */
+    @Volatile var muteOut = false
+    /** tests: nothing the host sends reaches the unit (e.g. its SESSION 0 lost, as when the app is killed) */
+    @Volatile var dropIn = false
 
     private val rx = object : MidiReceiver() {
         override fun onSend(msg: ByteArray, offset: Int, count: Int, timestamp: Long) {
-            unit.rx(msg, offset, count)
+            if (!dropIn) unit.rx(msg, offset, count)
         }
     }
 
@@ -39,7 +43,7 @@ class FakeFm1Service : MidiDeviceService() {
             while (running) {
                 val out = unit.poll()
                 val r = outputPortReceivers.firstOrNull()
-                if (out != null && r != null) {
+                if (out != null && r != null && !muteOut) {
                     var o = 0
                     while (o < out.size) {                   // (MidiPortImpl's packet: at most 1015 bytes of data)
                         val n = minOf(CHUNK, out.size - o)

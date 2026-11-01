@@ -240,10 +240,19 @@ JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeKey(JNIE
     return rfme_event_vel(host(p)->e, RFMC_EV_KEY, (uint8_t)key, down ? 1 : 0, (uint8_t)vel) ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStartAudio(JNIEnv *env, jclass, jlong p, jint device)
+JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStartAudio(JNIEnv *env, jclass, jlong p, jint device,
+                                                                                  jboolean usbSafe, jintArray forbidden)
 {
     char err[160] = {};
-    const int ok = rfmo_start(host(p)->out, device, err, sizeof err);
+    int32_t ids[16] = {};
+    int nf = 0;
+    if (forbidden) {
+        nf = env->GetArrayLength(forbidden);
+        if (nf > 16)
+            nf = 16;
+        env->GetIntArrayRegion(forbidden, 0, nf, reinterpret_cast<jint *>(ids));
+    }
+    const int ok = rfmo_start(host(p)->out, device, usbSafe ? 1 : 0, ids, nf, err, sizeof err);
     return utf(env, ok ? "" : (err[0] ? err : "start failed"));
 }
 
@@ -306,6 +315,8 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStatus(JN
     a.num("dead", o.dead);
     a.num("device_id", o.device_id);
     a.num("requested_device", o.requested_device);
+    a.num("usb_safe", o.usb_safe);
+    a.num("mmap", o.mmap);
     a.num("latency_ms", o.latency_ms);
     a.num("rate", o.rate);
     a.num("channels", o.channels);

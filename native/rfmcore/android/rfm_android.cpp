@@ -34,7 +34,13 @@ struct Dev {
     int transport = 0, inPort = 0, outPort = 0;
     bool gone = false;
     int users = 0;                                      // port pairs open on it (by session threads)
+    // its ports reopened when nothing came from it for this long (doubled each time, to kSilentMaxMs; back to the
+    // first value once bytes come again): a USB MIDI input that went quiet under Android is opened afresh
+    uint32_t silentAfter = 0;
+    uint32_t silentReopens = 0;
 };
+
+constexpr uint32_t kSilentFirstMs = 6000, kSilentMaxMs = 60000;
 
 struct Registry {
     std::mutex mu;
@@ -45,6 +51,7 @@ struct Registry {
 };
 
 JavaVM *gVm = nullptr;
+std::atomic<int> gFailWrites{0};                        // tests: the next n session writes fail
 
 Registry &reg()
 {
@@ -107,10 +114,12 @@ extern "C" int rfma_add_device(JNIEnv *env, jobject midi_device, const char *nam
     d.transport = transport;
     d.inPort = in_port;
     d.outPort = out_port;
+    d.silentAfter = kSilentFirstMs;
     r.devs.push_back(d);
     r.gen.fetch_add(1, std::memory_order_acq_rel);
-    __android_log_print(ANDROID_LOG_INFO, "RFMMidi", "device %d added: \"%s\" (%s), in %d out %d", d.id, nm.c_str(),
-                        transportName(transport), in_port, out_port);
+    __android_log_print(ANDROID_LOG_INFO, "RFMMidi", "device %d added: \"%s\" (%s), input port %d (we send to it), "
+                        "output port %d (we read it), of %d in / %d out", d.id, nm.c_str(), transportName(transport),
+                        in_port, out_port, (int)AMidiDevice_getNumInputPorts(dev), (int)AMidiDevice_getNumOutputPorts(dev));
     return d.id;
 }
 
@@ -145,6 +154,8 @@ extern "C" void rfma_remove_device(int id)
     __android_log_print(ANDROID_LOG_INFO, "RFMMidi", "device %d removed: \"%s\"", id, nm.c_str());
 }
 
+extern "C" void rfma_test_fail_writes(int n) { gFailWrites.store(n); }
+
 extern "C" uint32_t rfma_generation(void) { return reg().gen.load(std::memory_order_acquire); }
 
 extern "C" uint32_t rfma_devices_json(char *buf, uint32_t n)
@@ -154,9 +165,10 @@ extern "C" uint32_t rfma_devices_json(char *buf, uint32_t n)
         Registry &r = reg();
         std::lock_guard<std::mutex> g(r.mu);
         for (const Dev &d : r.devs) {
-            char b[96];
-            std::snprintf(b, sizeof b, "\"transport\":%d,\"in\":%d,\"out\":%d,\"linked\":%d,\"gone\":%d}", d.transport,
-                          d.inPort, d.outPort, d.users, d.gone ? 1 : 0);
+            char b[160];
+            std::snprintf(b, sizeof b, "\"transport\":%d,\"in\":%d,\"out\":%d,\"linked\":%d,\"gone\":%d,"
+                          "\"silent_reopens\":%u}", d.transport, d.inPort, d.outPort, d.users, d.gone ? 1 : 0,
+                          d.silentReopens);
             s += (s.size() > 1 ? ",{\"id\":" : "{\"id\":") + std::to_string(d.id) + ",\"name\":\"" + jsonEsc(d.name) +
                  "\"," + b;
         }
@@ -179,6 +191,10 @@ struct Link {
     AMidiOutputPort *out = nullptr;                     // and read its output port
     struct rfm_android *m = nullptr;
     char name[96] = {};
+    int inPort = 0, outPort = 0;
+    uint32_t opened = 0, lastRx = 0, rxBytes = 0, silentAfter = kSilentFirstMs;
+    bool gotFirst = false, fresh = false;               // fresh: opened, its clock not started (the next pump)
+    char fail[96] = {};                                 // a write failed (dropped at the next pump): why
 };
 
 } // namespace
@@ -190,6 +206,8 @@ struct rfm_android {
     Link l[RFM_MAX_LINKS];
     uint32_t now = 0, seenGen = 0;
     rfm_android_stats_t st{};
+    bool logNextRx = false;                             // the next bytes in are logged (a session started)
+    char logNextWhy[48] = {};
     bool attached = false;                              // this run attached the session thread to the JVM
     uint8_t buf[1024];                                  // one AMidi message (AMIDI_PACKET_SIZE)
 };
@@ -215,10 +233,18 @@ int wLink(void *ctx, const uint8_t *p, uint32_t n)
     Link *l = static_cast<Link *>(ctx);
     rfm_android_t *m = l->m;
     uint32_t done = 0;
+    if (gFailWrites.load(std::memory_order_relaxed) > 0 && gFailWrites.fetch_sub(1) > 0) {
+        m->st.write_fails++;
+        std::snprintf(l->fail, sizeof l->fail, "a write failed (the tests' hook)");
+        return -1;
+    }
     for (int tries = 0; done < n && tries < 20; tries++) {
         const ssize_t k = AMidiInputPort_send(l->in, p + done, n - done);
-        if (k < 0)
+        if (k < 0) {
+            m->st.write_fails++;
+            std::snprintf(l->fail, sizeof l->fail, "a write failed (AMidi %d, %u of %u bytes sent)", (int)k, done, n);
             return -1;
+        }
         done += (uint32_t)k;
         if (done < n) {
             m->st.tx_short++;
@@ -229,7 +255,22 @@ int wLink(void *ctx, const uint8_t *p, uint32_t n)
     m->st.tx_msgs++;
     if (n > m->st.tx_max)
         m->st.tx_max = n;
-    return done == n ? 0 : -1;
+    if (done != n) {
+        m->st.write_fails++;
+        std::snprintf(l->fail, sizeof l->fail, "a write was cut short (%u of %u bytes in 20 ms)", done, n);
+        return -1;
+    }
+    return 0;
+}
+
+void hexOf(const uint8_t *p, size_t n, char *out, size_t on)
+{
+    size_t o = 0;
+    out[0] = 0;
+    for (size_t i = 0; i < n && i < 16 && o + 4 < on; i++)
+        o += (size_t)std::snprintf(out + o, on - o, "%02x ", p[i]);
+    if (n > 16 && o + 4 < on)
+        std::snprintf(out + o, on - o, "..");
 }
 
 void closePorts(Link &l)
@@ -242,16 +283,19 @@ void closePorts(Link &l)
     l.out = nullptr;
 }
 
-// (registry locked) one link let go: out of the session, its ports closed, the device's count down
-void dropLocked(rfm_android_t *m, int i)
+// (registry locked) one link let go: out of the session, its ports closed, the device's count down; `why` is logged
+// ("link gone: <name>: <why>")
+void dropLocked(rfm_android_t *m, int i, const char *why)
 {
     Link &l = m->l[i];
     if (!l.used)
         return;
-    mlog(m, "link gone: %s", l.name);
+    mlog(m, "link gone: %s: %s (%u bytes in over %u ms)", l.name, why, l.rxBytes, m->now - l.opened);
     if (m->s && l.sid >= 0)
         rfm_session_remove_link(m->s, l.sid, m->now);
     closePorts(l);
+    mlog(m, "ports closed: %s: input port %d, output port %d", l.name, l.inPort, l.outPort);
+    m->st.link_drops++;
     if (Dev *d = findLocked(l.devId))
         d->users--;
     m->st.midi_links--;
@@ -305,7 +349,7 @@ void rfm_android_rescan(rfm_android_t *m)
             continue;
         const Dev *d = findLocked(m->l[i].devId);
         if (!d || d->gone)
-            dropLocked(m, i);
+            dropLocked(m, i, d ? "the device was removed" : "the device is no longer listed");
     }
     // devices without a link of this run
     for (Dev &d : r.devs) {
@@ -323,13 +367,26 @@ void rfm_android_rescan(rfm_android_t *m)
         l.m = m;
         l.devId = d.id;
         l.transport = d.transport;
+        l.inPort = d.inPort;
+        l.outPort = d.outPort;
+        l.opened = l.lastRx = m->now;
+        l.fresh = true;
+        l.rxBytes = 0;
+        l.gotFirst = false;
+        l.fail[0] = 0;
+        l.silentAfter = d.silentAfter;
         std::snprintf(l.name, sizeof l.name, "midi \"%s\" (%s)", d.name.c_str(), transportName(d.transport));
-        if (AMidiInputPort_open(d.dev, d.inPort, &l.in) != AMEDIA_OK ||
-            AMidiOutputPort_open(d.dev, d.outPort, &l.out) != AMEDIA_OK) {
-            mlog(m, "cannot open the ports of %s", l.name);
+        const media_status_t ri = AMidiInputPort_open(d.dev, d.inPort, &l.in);
+        const media_status_t ro = ri == AMEDIA_OK ? AMidiOutputPort_open(d.dev, d.outPort, &l.out) : AMEDIA_OK;
+        if (ri != AMEDIA_OK || ro != AMEDIA_OK) {
+            mlog(m, "cannot open the ports of %s: input port %d: %d, output port %d: %d", l.name, d.inPort, (int)ri,
+                 d.outPort, (int)ro);
             closePorts(l);
             continue;
         }
+        m->st.port_opens++;
+        mlog(m, "ports open: %s: input port %d (we send to it), output port %d (we read it)", l.name, d.inPort,
+             d.outPort);
         l.sid = rfm_session_add_link(m->s, RFM_LINK_SX, wLink, &l, l.name);
         if (l.sid < 0) {
             closePorts(l);
@@ -357,6 +414,10 @@ void rfm_android_pump(rfm_android_t *m, uint32_t now)
         Link &l = m->l[i];
         if (!l.used)
             continue;
+        if (l.fresh) {
+            l.opened = l.lastRx = now;
+            l.fresh = false;
+        }
         for (int k = 0; k < 256; k++) {                 // (bounded: the session's poll gets its turn)
             int32_t op = 0;
             size_t got = 0;
@@ -364,14 +425,33 @@ void rfm_android_pump(rfm_android_t *m, uint32_t now)
             const ssize_t r = AMidiOutputPort_receive(l.out, &op, m->buf, sizeof m->buf, &got, &ts);
             if (r < 0) {
                 m->st.rx_errors++;
+                char why[64];
+                std::snprintf(why, sizeof why, "a read failed (AMidi %d)", (int)r);
                 std::lock_guard<std::mutex> g(reg().mu);
-                dropLocked(m, i);
+                dropLocked(m, i, why);
                 break;
             }
             if (r == 0)
                 break;
             if (op != AMIDI_OPCODE_DATA || !got)
                 continue;
+            if (!l.gotFirst || m->logNextRx) {
+                char hex[80];
+                hexOf(m->buf, got, hex, sizeof hex);
+                if (!l.gotFirst)
+                    mlog(m, "first bytes from %s, %u ms after its ports opened: %s", l.name, now - l.opened, hex);
+                else
+                    mlog(m, "bytes from %s %s: %s", l.name, m->logNextWhy, hex);
+                m->logNextRx = false;
+                if (!l.gotFirst && l.silentAfter != kSilentFirstMs) {   // (it talks again: the first wait again)
+                    std::lock_guard<std::mutex> g(reg().mu);
+                    if (Dev *d = findLocked(l.devId))
+                        d->silentAfter = kSilentFirstMs;
+                }
+                l.gotFirst = true;
+            }
+            l.lastRx = now;
+            l.rxBytes += (uint32_t)got;
             m->st.rx_bytes += (uint32_t)got;
             m->st.rx_msgs++;
             if (got > m->st.rx_max)
@@ -379,7 +459,34 @@ void rfm_android_pump(rfm_android_t *m, uint32_t now)
             if (m->s)
                 rfm_session_rx(m->s, l.sid, m->buf, (uint32_t)got, now);
         }
+        if (!l.used)
+            continue;
+        if (l.fail[0]) {                                // a write failed: the session marked the link dead; the
+            char why[96];                               // ports are closed and opened again at the next rescan
+            std::snprintf(why, sizeof why, "%s", l.fail);
+            std::lock_guard<std::mutex> g(reg().mu);
+            dropLocked(m, i, why);
+            continue;
+        }
+        if (now - l.lastRx > l.silentAfter) {           // nothing from the unit: its ports opened afresh
+            char why[96];
+            std::snprintf(why, sizeof why, "nothing from the unit for %u s (%s): its ports are reopened",
+                          (now - l.lastRx) / 1000u, l.gotFirst ? "it had talked" : "never a byte");
+            std::lock_guard<std::mutex> g(reg().mu);
+            if (Dev *d = findLocked(l.devId)) {
+                d->silentReopens++;
+                d->silentAfter = d->silentAfter * 2 > kSilentMaxMs ? kSilentMaxMs : d->silentAfter * 2;
+            }
+            m->st.silent_reopens++;
+            dropLocked(m, i, why);
+        }
     }
+}
+
+void rfm_android_log_next_rx(rfm_android_t *m, const char *why)
+{
+    m->logNextRx = true;
+    std::snprintf(m->logNextWhy, sizeof m->logNextWhy, "%s", why ? why : "");
 }
 
 void rfm_android_wait(rfm_android_t *, uint32_t ms)
@@ -410,7 +517,7 @@ void rfm_android_free(rfm_android_t *m)
         std::lock_guard<std::mutex> g(reg().mu);
         m->s = nullptr;                                 // (the session may be gone already)
         for (int i = 0; i < RFM_MAX_LINKS; i++)
-            dropLocked(m, i);
+            dropLocked(m, i, "the link run ended (stopped by the app)");
     }
     if (m->attached && gVm)
         gVm->DetachCurrentThread();

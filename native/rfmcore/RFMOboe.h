@@ -17,9 +17,12 @@ typedef struct rfmo rfmo_t;
 rfmo_t *rfmo_new(rfme_t *e);        // e must outlive it
 void rfmo_free(rfmo_t *o);          // stops first
 
-// opens and starts the stream on device_id (0: the default output) and gives the engine's clock to it
-// (RFME_CLOCK_AUDIO). 1: playing; 0: failed (err)
-int rfmo_start(rfmo_t *o, int32_t device_id, char *err, uint32_t n);
+// opens and starts the stream on device_id (0: the default output, which the app never asks for) and gives the
+// engine's clock to it (RFME_CLOCK_AUDIO). usb_safe: a USB output the user picked: shared, Android's mixer, MMAP
+// off. forbidden: device ids the stream must not play on (the USB outputs not picked): if Android routed it to one,
+// it is closed before it starts. 1: playing; 0: failed (err)
+int rfmo_start(rfmo_t *o, int32_t device_id, int usb_safe, const int32_t *forbidden, int n_forbidden, char *err,
+               uint32_t n);
 // stops and closes the stream; the engine's clock goes to `clock_after` (RFME_CLOCK_TIMER keeps the core running)
 void rfmo_stop(rfmo_t *o, int clock_after);
 // tests: what a device disconnect does (the stream closed under us, the error callback's count and flag), so the
@@ -31,6 +34,8 @@ typedef struct {
     int dead;                       // the stream was closed by a disconnect (onErrorAfterClose): reopen it
     int32_t device_id;              // the device the stream plays on (AudioDeviceInfo.getId)
     int32_t requested_device;       // the one asked for (0: the default)
+    int usb_safe;                   // opened the careful way (a picked USB output)
+    int mmap;                       // 1 MMAP, 0 not, -1 unknown
     double latency_ms;              // Oboe's calculateLatencyMillis (-1: unknown)
     int32_t rate, channels, frames_per_burst, buffer_size, buffer_capacity;
     int32_t api;                    // oboe::AudioApi: 1 OpenSL ES, 2 AAudio

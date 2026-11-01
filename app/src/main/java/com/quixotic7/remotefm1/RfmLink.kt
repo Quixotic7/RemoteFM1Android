@@ -115,5 +115,9 @@ object LinkStatus {
         touchWanted = j.optInt("touch_wanted"), touch = j.optInt("touch"), touchSent = j.optLong("touch_sent"),
         midiLinks = j.optLong("midi_links"), rxBytes = j.optLong("rx_bytes"), txBytes = j.optLong("tx_bytes"),
         txShort = j.optLong("tx_short"), frameLink = j.optString("frame_link"),
+        panelR = j.optLong("panel_r"), lost = j.optLong("lost"), decodeErrs = j.optLong("decode_errs"),
+        linkDrops = j.optLong("link_drops"), silentReopens = j.optLong("silent_reopens"),
+        writeFails = j.optLong("write_fails"), rxErrors = j.optLong("rx_errors"),
+        lastEventAgeMs = j.optLong("last_event_age_ms", -1),
     )
 }

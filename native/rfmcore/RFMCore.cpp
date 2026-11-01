@@ -357,6 +357,14 @@ void rfmc_status(rfmc_t *c, rfmc_status_t *st)
     st->rx_bytes = s.rxBytes;
     st->tx_bytes = s.txBytes;
     st->tx_short = s.txShort;
+    st->panel_r = s.panelR;
+    st->lost = s.lost;
+    st->decode_errs = s.decodeErrs;
+    st->link_drops = s.linkDrops;
+    st->silent_reopens = s.silentReopens;
+    st->write_fails = s.writeFails;
+    st->rx_errors = s.rxErrors;
+    st->last_event_age_ms = s.lastEventAgeMs;
     copyStr(st->frame_link, sizeof st->frame_link, s.frameLinkName.c_str());
     copyStr(st->text, sizeof st->text, s.text.c_str());
     copyStr(st->log, sizeof st->log, s.lastLog.c_str());
