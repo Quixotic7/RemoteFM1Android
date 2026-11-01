@@ -1,0 +1,10 @@
+{
+  "date" : 1793000000.5,
+  "firmwareID" : "choralroot",
+  "id" : "CB9685C4-916E-4E47-9505-D4A56912DAA7",
+  "kind" : "event",
+  "reason" : "before update 0.26.0→0.26.1",
+  "sha256" : "82d7a9b4c83532d12f5d538be12e50e47f68da34acb5dce9049e8f101fe58510",
+  "size" : 65536,
+  "version" : "0.26.0"
+}

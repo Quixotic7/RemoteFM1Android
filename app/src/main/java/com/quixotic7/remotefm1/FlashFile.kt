@@ -41,7 +41,7 @@ object FlashFile {
     fun write(data: ByteArray, f: File, firmwareID: String? = null, version: String? = null,
               now: Double = System.currentTimeMillis() / 1000.0, keepPrev: Boolean = true) {
         val dir = f.absoluteFile.parentFile
-        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("cannot make $dir")
+        if (!dir.mkdirs() && !dir.isDirectory) throw IOException("cannot make $dir")
         val tmp = File(dir, ".${f.name}.tmp")
         tmp.delete()
         try {

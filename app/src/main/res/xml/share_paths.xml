@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- (A5) what the FileProvider shares: a state's .rfm1state or a backup's .zip, written to the cache's share/ -->
+<paths>
+    <cache-path name="share" path="share/" />
+</paths>

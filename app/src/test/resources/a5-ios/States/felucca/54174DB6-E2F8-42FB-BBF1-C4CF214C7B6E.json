@@ -1,0 +1,14 @@
+{
+  "date" : 1793000000.5,
+  "firmwareID" : "felucca",
+  "firmwareName" : "Felucca",
+  "flashSHA256" : "64f83a32b6152f3dd1bed51ac01026ee219c69b59e43740f9a9e7e8d0818964d",
+  "flashSize" : 8192,
+  "id" : "54174DB6-E2F8-42FB-BBF1-C4CF214C7B6E",
+  "kind" : "wasm",
+  "name" : "Bass",
+  "note" : "",
+  "origin" : "au",
+  "sha256" : "abababababababababababababababababababababababababababababababab",
+  "version" : "1.6.2"
+}

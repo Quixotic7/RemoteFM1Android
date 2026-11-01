@@ -1,0 +1,17 @@
+{
+  "date" : 1793000000.5,
+  "firmwareID" : "choralroot",
+  "firmwareName" : "ChoralRoot",
+  "flashSHA256" : "941fb524949a2f541879aaed873cc9fda72233759b052540985dec0fdbe6d678",
+  "flashSize" : 65536,
+  "id" : "2464468E-8539-49C7-BB85-FF1AF837216A",
+  "keyTouch" : false,
+  "kind" : "native",
+  "master" : 700,
+  "name" : "Pads from iOS",
+  "note" : "a note: ünïcödé \"q\" \/ slash",
+  "origin" : "app",
+  "sha256" : "",
+  "transpose" : -1,
+  "version" : "0.26.1"
+}

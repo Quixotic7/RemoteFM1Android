@@ -1,0 +1,43 @@
+{
+  "app" : "ios-test",
+  "current" : [
+    {
+      "date" : 1793000000.5,
+      "file" : "Current\/ChoralRoot current.rfm1state",
+      "firmwareID" : "choralroot",
+      "flashSHA256" : "fe5bc5d3bf8aa96bd518ce60075d8ed13be708f7d213c2352ed4cf0c81429673",
+      "name" : "ChoralRoot current",
+      "version" : "0.26.1"
+    }
+  ],
+  "date" : 1793000000.5,
+  "format" : 1,
+  "safetyCopies" : [
+    {
+      "date" : 1793000000.5,
+      "file" : "Safety copies\/ChoralRoot\/ChoralRoot Oct 26, 2026 at 12-33 AM before update 0.26.0→0.26.1.rfm1state",
+      "firmwareID" : "choralroot",
+      "flashSHA256" : "82d7a9b4c83532d12f5d538be12e50e47f68da34acb5dce9049e8f101fe58510",
+      "name" : "ChoralRoot Oct 26, 2026 at 12:33 AM before update 0.26.0→0.26.1",
+      "version" : "0.26.0"
+    }
+  ],
+  "states" : [
+    {
+      "date" : 1793000000.5,
+      "file" : "States\/ChoralRoot\/Pads from iOS.rfm1state",
+      "firmwareID" : "choralroot",
+      "flashSHA256" : "941fb524949a2f541879aaed873cc9fda72233759b052540985dec0fdbe6d678",
+      "name" : "Pads from iOS",
+      "version" : "0.26.1"
+    },
+    {
+      "date" : 1793000000.5,
+      "file" : "States\/Felucca\/Bass.rfm1state",
+      "firmwareID" : "felucca",
+      "flashSHA256" : "64f83a32b6152f3dd1bed51ac01026ee219c69b59e43740f9a9e7e8d0818964d",
+      "name" : "Bass",
+      "version" : "1.6.2"
+    }
+  ]
+}

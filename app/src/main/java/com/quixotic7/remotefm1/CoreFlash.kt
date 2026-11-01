@@ -33,6 +33,8 @@ class CoreFlash(
         private set
     var reboots = 0
         private set
+    /** (A5) after each good write, on the flash thread: the core id and the image (data/DataSafety.written) */
+    @Volatile var onWritten: ((String, ByteArray) -> Unit)? = null
     private var buf = ByteArray(0)
     private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "rfm-flash").apply { isDaemon = true } }
 
@@ -146,6 +148,7 @@ class CoreFlash(
             try {
                 FlashFile.write(data, f, firmwareID = id, version = version)
                 lastError = ""
+                onWritten?.let { runCatching { it(id, data) } }
             } catch (e: Exception) {
                 lastError = "${f.name}: ${e.message}"
                 Log.e(TAG, "flash: ${f.path}: $e")

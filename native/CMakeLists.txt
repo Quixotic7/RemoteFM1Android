@@ -37,3 +37,9 @@ target_include_directories(rfmcore PRIVATE ${R} ${R}/include ${FM1VST}/engine ${
 target_compile_options(rfmcore PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(rfmcore PRIVATE remotefm1 oboe::oboe amidi log dl)
 target_link_options(rfmcore PRIVATE -Wl,-z,max-page-size=16384)
+
+# (A5) librfmlzfse.so: Apple's lzfse (native/lzfse/src, BSD-3) and its JNI, for the states' LZFSE (data/Lzfse.kt)
+file(GLOB RFM_LZFSE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/lzfse/src/*.c)
+add_library(rfmlzfse SHARED ${RFM_LZFSE_SRC} ${CMAKE_CURRENT_SOURCE_DIR}/lzfse/lzfse_jni.c)
+target_compile_options(rfmlzfse PRIVATE -O2 -Wno-unused-parameter)
+target_link_options(rfmlzfse PRIVATE -Wl,-z,max-page-size=16384)
