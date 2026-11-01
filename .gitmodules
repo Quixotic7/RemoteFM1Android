@@ -1,0 +1,21 @@
+[submodule "vendor/RemoteFM1"]
+	path = vendor/RemoteFM1
+	url = https://github.com/Quixotic7/RemoteFM1.git
+[submodule "vendor/FM1VST"]
+	path = vendor/FM1VST
+	url = https://github.com/Quixotic7/FM1VST.git
+[submodule "vendor/FIZZ"]
+	path = vendor/FIZZ
+	url = https://github.com/Quixotic7/FIZZ.git
+[submodule "vendor/saadet"]
+	path = vendor/saadet
+	url = https://github.com/keremimo/saadet.git
+[submodule "vendor/fm1-base"]
+	path = vendor/fm1-base
+	url = https://github.com/charlesvestal/fm1-base.git
+[submodule "vendor/boardwalk"]
+	path = vendor/boardwalk
+	url = https://github.com/charlesvestal/fm1-boardwalk.git
+[submodule "vendor/loom"]
+	path = vendor/loom
+	url = https://github.com/charlesvestal/fm1-loom.git

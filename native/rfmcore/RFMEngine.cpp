@@ -1,0 +1,1644 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 RemoteFM1 contributors
+// Copied from RemoteFM1IOS 0d1a98b RFMKit/Sources/RFMCore/RFMEngine.cpp; changes: Android. The host parameters
+// (RFMHostParams, the AU's parameter tree: rfme_hp_*, rfme_render_events) and the audio workgroup are left out;
+// time is rfm::nowTicks (ns) instead of mach ticks; the core thread is named with pthread_setname_np(self) and
+// runs at audio priority (RFMRealtime.h); the link is RFMLinkStub.h's stand-in until A1. Everything else as there.
+// The core engine (include/RFMEngine.h). Adapted from RemoteFM1 v0.2.2's host/tools/fm1remote/engine.cpp (Engine:
+// the between hook, the publish at most every frame period and only on change, the flash copy every 30 device s and
+// final_flash, the timer clock). Changed: ABI 6's fm1panel_t instead of emu_hal_t, with FM1VST v0.6.2's
+// plugin/Processor.cpp mapping (applyRemote: buttons by label, encoders by role with enc_dir undone, velocity 100 for
+// the unit's keys; remoteLeds: each LED in the plane of its fm1p_led_class, PLAY green); slots instead of
+// CoreLoader's copies; the clock owned by one of audio / timer / caller at a time (rfme_set_clock); the preview
+// for the app; flash on request; the core's stats() and the render's own time. M4: host MIDI in (FM1VST's handleMidi,
+// pushKeys, forwardMidi and toUsbPackets) and the core's MIDI out kept for the AU's MIDI output. M7: the core behind
+// a backend (RFMCoreBackend.h), and one core thread per engine that renders ahead of the audio callback (the ring,
+// below) and also runs the timer clock. M8: a controller's MIDI (rfme_midi_in) on host MIDI's path, MIDI learn and the
+// learned map (RFMMidiMap.h) ahead of it, on the core thread.
+#include "RFMEngine.h"
+
+#include <pthread.h>
+
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "RFMCoreBackend.h"
+#include "RFMDevice.h"
+#include "RFMInternal.h"
+#include "RFMMidiMap.h"
+#include "RFMRealtime.h"
+#include "RFMLinkStub.h"
+
+static_assert(RFME_B_OCTUP == FM1P_B_OCTUP && RFME_B_SAVE == FM1P_B_SAVE && RFME_E_K4 == FM1P_E_K4, "labels");
+static_assert(RFMC_EV_KEY == RFM_EV_KEY && RFMC_EV_BUTTON == RFM_EV_BUTTON && RFMC_EV_ENC == RFM_EV_ENC &&
+                  RFMC_EV_MASTER == RFM_EV_MASTER && RFMC_EV_PRESS == RFM_EV_PRESS && RFMC_CAP_TOUCH == RFM_CAP_TOUCH && RFMC_EV_RELEASE == RemoteLink::kEvRelease,
+              "event types");
+static_assert(sizeof(RemoteSnapshot::lcd) == sizeof(fm1panel_t::lcd), "the LCD layouts differ");
+
+namespace {
+
+constexpr uint32_t kPeriodMs = RemoteLink::kPeriodMs;   // the LCD and LEDs at most every 50 device ms (20 fps)
+constexpr uint32_t kPreviewMs = 33;                      // the app's preview at most every 33 device ms (30 fps)
+constexpr uint32_t kPanelMs = 8;                         // the on-screen panel's state at most every 8 device ms
+constexpr int kNIds = FM1P_NBTN + FM1P_NKEY;             // keymap ids: 0..13 matrix buttons, 14.. note keys
+constexpr uint32_t kFlashEveryMs = 30000;
+constexpr uint32_t kStatsEveryMs = 500;
+constexpr int kRemoteVel = 100;                          // RemoteFM1 sends no velocity (Processor.cpp kRemoteVel)
+constexpr int kNoteBase = 53;                            // the MIDI note of key 0 (F3), Processor.h kNoteBase
+constexpr uint32_t kInRing = 512;                        // host MIDI packets waiting for the core's midi_in
+// render ahead (RFME_CLOCK_AUDIO)
+constexpr uint32_t kRingFrames = 16384;                  // the audio ring: stereo frames, a power of two
+constexpr uint32_t kChunk = 64;                          // the core thread renders at most this many frames at once
+constexpr uint32_t kDefaultHeadroomUs = 6000;            // the ring's target beyond one host buffer: a 5 ms redraw
+constexpr uint32_t kOfflineWaitUs = 2000000;             // offline: how long a render waits for the core at most
+static_assert((kRingFrames & (kRingFrames - 1)) == 0, "the ring's size is a power of two");
+
+// a host MIDI message on its way to the core thread: `at` is its ring position (the frame it applies before).
+// (value and seq: iOS's host parameter changes, len 0; none here)
+// epoch: the stream the render that made it played (a stale one is dropped by the core thread, a current one never)
+struct HostEvent {
+    uint64_t at;
+    uint8_t len;
+    uint8_t data[3];
+    float value;
+    uint32_t seq;
+    uint32_t epoch;
+};
+// (M8) a controller's message on its way to the core thread (rfme_midi_in)
+struct CtlEvent {
+    uint8_t toFirmware;
+    uint8_t len;
+    uint8_t data[3];
+};
+// a message learn took (rfme_learn_take)
+struct LearnMsg {
+    uint8_t data[3];
+};
+// a USB-MIDI packet of the core's, with the ring position it was made at
+struct OutPacket {
+    uint64_t at;
+    uint32_t pkt;
+};
+
+std::atomic<int> gCoreThreads{0};                        // core threads alive in this process (tests)
+
+// one MIDI message -> USB-MIDI event packets (cable 0): FM1VST's toUsbPackets (plugin/EditorPort.h), channel and system
+// messages only (the host's SysEx is not passed in)
+template <typename Put> void toUsbPackets(const uint8_t *d, uint32_t n, Put &&put)
+{
+    auto pkt = [](uint32_t cin, uint32_t a, uint32_t b, uint32_t c) { return (cin & 15u) | a << 8 | b << 16 | c << 24; };
+    if (n == 0)
+        return;
+    const uint8_t st = d[0];
+    if (st >= 0xF8) {
+        put(pkt(0xF, st, 0, 0));
+    } else if (st >= 0xF0) {
+        if (st == 0xF1 || st == 0xF3)
+            put(pkt(2, st, n > 1 ? d[1] : 0u, 0));
+        else if (st == 0xF2)
+            put(pkt(3, st, n > 1 ? d[1] : 0u, n > 2 ? d[2] : 0u));
+        else if (st == 0xF6)
+            put(pkt(5, st, 0, 0));
+    } else if (st >= 0x80) {
+        put(pkt(st >> 4, st, n > 1 ? d[1] : 0u, n > 2 ? d[2] : 0u));
+    }
+}
+
+rfm_event_t panelEvent(uint8_t type, uint8_t index, int value)
+{
+    rfm_event_t e{};
+    e.type = type;
+    e.index = index;
+    e.value = (int16_t)value;
+    return e;
+}
+
+struct Preview {
+    uint16_t lcd[FM1P_LCD_W * FM1P_LCD_H];
+    rfm_leds_t leds;
+    uint32_t seq = 0, devMs = 0;
+};
+
+double ticksToUs() { return rfm::kUsPerTick; }
+
+// The panel's LED levels as RemoteFM1's LEDS planes (Processor.cpp remoteLeds)
+void remoteLeds(const fm1panel_t *h, rfm_leds_t &l)
+{
+    std::memset(&l, 0, sizeof l);
+    for (int c = 0; c < (int)RFM_NCOL && c < FM1P_NCOL; c++)
+        for (int r = 0; r < FM1P_NLINE; r++) {
+            const uint8_t bit = (uint8_t)(1u << (r + 1));
+            switch (fm1p_led_class(h->led[c][r])) {
+            case FM1P_LC_LIT: l.lit[c] |= bit; break;
+            case FM1P_LC_MID: l.mid[c] |= bit; break;
+            case FM1P_LC_DIM: l.dim[c] |= bit; break;
+            case FM1P_LC_FAINT: l.faint[c] |= bit; break;
+            default: break;
+            }
+        }
+    l.flags = fm1p_led_class(h->led_play_green) == FM1P_LC_LIT ? RFM_LEDS_F_PLAY_GREEN : 0;
+}
+
+void putErr(char *err, uint32_t n, const std::string &s)
+{
+    if (err && n) {
+        std::strncpy(err, s.c_str(), n - 1);
+        err[n - 1] = 0;
+    }
+}
+
+} // namespace
+
+struct rfme final {
+    rfmc_t *owner = nullptr;            // the link's handle (NULL: headless)
+    RemoteLink *link = nullptr;
+
+    // the core (the control thread changes these only with the clock stopped)
+    rfm::CoreFactory factory;               // makes the backend (the load's; a power cycle makes a new one with it)
+    std::unique_ptr<rfm::CoreBackend> core; // the firmware (a native slot; later a Wasm module)
+    std::unique_ptr<rfm::CoreDevice> dev;   // its clock
+    uint32_t stallUs = 0;                   // (tests) rfme_test_frame_stall
+    uint8_t btnId[FM1P_NB] = {}, encId[FM1P_NE - 1] = {};   // the panel's label / role maps, as init left them
+    bool booted = false;
+    std::vector<uint8_t> flashCopy;     // the clock's copy, handed over by flashReady
+
+    // the clock: exactly one owner runs it; inClock counts threads inside a clock entry
+    std::atomic<int> clock{RFME_CLOCK_NONE};
+    std::atomic<int> inClock{0};
+    std::atomic<bool> attached{false};
+
+    // the clock thread's own
+    uint32_t noteKeys = 0, labels = 0, matrixButtons = 0;
+    uint8_t noteVel[FM1P_NKEY] = {};        // (TOUCH) each FM-1 key's press velocity, 0 none given (kRemoteVel)
+    // host MIDI (the clock's own; FM1VST's midiKeys_, midiVel_, noteKey_, keyCount_, appliedKeys_, inRing_)
+    uint32_t midiKeys = 0, appliedKeys = 0;
+    uint8_t midiVel[FM1P_NKEY] = {};
+    uint8_t keyCount[FM1P_NKEY] = {};
+    int8_t noteKey[16][128];
+    uint32_t inRing[kInRing] = {};
+    uint32_t inR = 0, inW = 0;
+    std::atomic<int> keyChannel{RFME_KEYS_ANY}, transpose{0}, keyNotesToFw{0};
+    std::atomic<bool> mapOn{true};
+    bool mapWasOn = true;                   // (the core thread's) mapOn as syncMap last saw it
+    std::atomic<int> midiOutOn{0};
+    rfm::Spsc<OutPacket, 2048> midiOutQ;                 // the core thread -> the render thread (the AU's MIDI output)
+    std::atomic<uint32_t> midiInCount{0}, midiNotes{0}, midiInDropped{0};
+    // (M8) a controller's MIDI, learn and the learned map. The queues' producers: rfme_midi_in's callers (serialised
+    // by ctlLock, never the audio thread) and the core thread (learnQ); the map comes over in a Triple
+    rfm::Spsc<CtlEvent, 1024> ctlQ;
+    rfm::Spsc<uint32_t, 4096> sysexQ;   // (a web manager's SysEx, rfme_sysex_in) USB-MIDI packets for the core's midi_in
+    std::mutex ctlLock;
+    rfm::Spsc<LearnMsg, 256> learnQ;
+    std::atomic<bool> learnArmed{false};
+    rfm::Triple<rfm::MapTable> mapIn;
+    std::unique_ptr<rfm::MidiMapper> mapper{new rfm::MidiMapper()};   // (the core thread's)
+    uint32_t learnNotes[16][4] = {};        // (the core thread's) the notes learn took, held: their note-offs too
+    int16_t masterPot = -1;                 // (the core thread's) rfme_panel_t.master_pot, pickup_seq
+    uint16_t pickupSeq = 0;
+    std::atomic<uint32_t> midiMapped{0}, midiLearned{0}, midiToCore{0};
+    std::atomic<uint32_t> namesGen{1};      // (rfme_button_names_gen) moves on a core change or the setting
+    std::atomic<int> namesUse{1};
+    std::mutex coreLock;                    // guards `core` against an unload while another thread reads its names
+    int32_t masterV = -1;
+    uint32_t lastPub = 0, lastWrites = 0, linkPubs = 0, pubSeq = 0;
+    uint32_t lastLinkPub = 0, lastLinkWrites = 0;
+    rfm_leds_t lastLeds{}, lastLinkLeds{};
+    // the on-screen panel's state (the clock's own, then published): each keymap id's LED (column, line), -1 none
+    int8_t ledCol[kNIds], ledLine[kNIds];
+    rfme_panel_t panelLast{};
+    uint32_t lastPanel = 0;
+    rfm::Triple<rfme_panel_t> panelOut;
+    uint32_t panelSeen = 0;                 // (the reader's)
+    bool pubValid = false, linkValid = false;
+    uint32_t lastFlashCheck = 0, savedDirty = 0, lastStats = 0;
+    rfm::Spsc<rfm_event_t, 1024> in;    // rfme_event -> the clock
+    rfm::Triple<Preview> preview;       // the clock -> rfme_preview
+
+    // read by anyone
+    std::atomic<bool> halted{false}, flashReady{false}, flashReq{false};
+    std::atomic<uint32_t> haltCode{0}, devMs{0}, lcdWrites{0}, snapshots{0}, applied{0}, dropped{0}, keysPressed{0};
+    std::atomic<uint32_t> lastVel{0}, lastLean{0};  // (TOUCH) key << 8 | the key_vel / key_lean last given the core
+    std::atomic<uint32_t> midiOut{0}, shed{0}, cpuPct{0}, haveStats{0}, flashCopies{0}, flashDirty{0};
+    std::atomic<uint64_t> renders{0}, renderFrames{0}, renderTicks{0};
+    std::atomic<uint32_t> renderLastUs{0}, renderMaxUs{0}, renderLastFrames{0};
+    std::atomic<double> rate{0};
+    double usPerTick = ticksToUs();
+
+    // ---- THE CORE THREAD. It owns every call into the core while a clock runs (RFME_CLOCK_AUDIO: rendering ahead
+    // into the ring; RFME_CLOCK_TIMER: the wall clock, the sound dropped). The control thread calls into the core
+    // only with the clock stopped (stop / resume); RFME_CLOCK_CALLER is the caller's thread. Its waits are all
+    // bounded (the semaphore with a timeout), so stop and rfme_free never wait for more than one chunk.
+    pthread_t thread{};
+    bool threadStarted = false;             // (the control thread's)
+    std::atomic<bool> quit{false};
+    rfm::Semaphore wake;                    // the audio callback (and resume) -> the core thread
+    rfm::Semaphore produced;                // the core thread -> an offline render waiting for frames
+    std::atomic<bool> offlineWaiting{false};
+    std::atomic<uint32_t> periodUs{0};      // the host buffer's duration: the core thread's real-time period
+    std::atomic<int> rtOk{0};
+    bool timerRebase = true;                // (the core thread's)
+    bool producing = false;                 // (the core thread's) inside produce(): the MIDI out is kept
+    uint64_t outAt = 0;                     // (the core thread's) the ring position of the render running
+
+    // ---- THE RING (RFME_CLOCK_AUDIO). One producer (the core thread: posW), one consumer (the audio callback:
+    // posR); positions count frames since the engine was made and never wrap. The producer keeps it filled to
+    // `target` frames (a host buffer plus the headroom) in chunks of at most kChunk; a host event made at
+    // callback position p + offset is applied at ring position p + offset + latency (latency = target + kChunk:
+    // always at or beyond the end of whatever chunk the core thread is rendering), so it sounds `latency` frames
+    // after it was due, exactly, and the MIDI out keeps its position the same way.
+    std::unique_ptr<float[]> bufL{new float[kRingFrames]()}, bufR{new float[kRingFrames]()};
+    std::atomic<uint64_t> posW{0}, posR{0};
+    rfm::Spsc<HostEvent, 1024> hostQ;       // the audio callback -> the core thread
+    // a stream starts with each epoch: the control thread bumps it when the core or the clock changes; the
+    // producer answers with where its audio for that epoch starts; the consumer skips to there and waits until the
+    // ring holds `target` frames (primed) before it plays
+    std::atomic<uint32_t> epoch{0}, prodEpoch{~0u};
+    std::atomic<uint64_t> epochStart{0};
+    std::atomic<bool> audioLive{false};     // the clock is the audio callback's and a core is booted
+    std::atomic<uint32_t> target{0}, latency{0};
+    std::atomic<double> hostRate{0};
+    std::atomic<uint32_t> headroomUs{kDefaultHeadroomUs}, minBuffer{0};
+    std::atomic<bool> offline{false}, retargetReq{false};
+    uint32_t pEpoch = ~0u;                  // (the producer's) the epoch it renders
+    // (the consumer's)
+    uint32_t cEpoch = ~0u, cMaxN = 0;
+    uint64_t cLastAt = 0;                   // the last host event's ring position this epoch (stamps never go back)
+    double cRate = 0;
+    bool primed = false;
+    uint64_t outBase = 0, outEnd = 0;       // the ring span the last render played (for rfme_midi_out_take_at)
+    uint32_t outN = 0;
+    // stats: the consumer's
+    std::atomic<uint32_t> underruns{0}, underrunFrames{0}, fillMin{~0u};
+    std::atomic<bool> fillReset{false};
+    // the producer's (per wake: about one host buffer)
+    std::atomic<uint64_t> coreTicks{0}, coreWakes{0}, coreFrames{0}, coreMaxTicks{0}, frameMaxTicks{0};
+    std::atomic<bool> coreReset{false};
+
+    // the main thread's view of the preview
+    uint32_t viewSeq = 0;
+
+    // ---- the clock's guard
+    struct Scope {
+        rfme *e;
+        bool ok;
+        Scope(rfme *x, int who) : e(x)
+        {
+            e->inClock.fetch_add(1, std::memory_order_seq_cst);
+            ok = e->clock.load(std::memory_order_seq_cst) == who && e->dev && e->booted;
+        }
+        ~Scope() { e->inClock.fetch_sub(1, std::memory_order_seq_cst); }
+    };
+
+    // the control thread: the clock stopped (the old owner out of it: at most one chunk); returns the old owner
+    int stop()
+    {
+        audioLive.store(false, std::memory_order_seq_cst);
+        const int prev = clock.exchange(RFME_CLOCK_NONE, std::memory_order_seq_cst);
+        while (inClock.load(std::memory_order_seq_cst) != 0)
+            std::this_thread::yield();
+        return prev;
+    }
+    // fresh: the core or the clock changed, so the audio stream starts again (a new epoch)
+    void resume(int who, bool fresh)
+    {
+        if (who == RFME_CLOCK_TIMER || who == RFME_CLOCK_AUDIO)
+            startThread();
+        if (fresh)
+            epoch.fetch_add(1, std::memory_order_seq_cst);
+        if (who == RFME_CLOCK_TIMER)
+            timerRebase = true;                          // (the core thread is out of the clock: stop() saw to it)
+        clock.store(who, std::memory_order_seq_cst);
+        audioLive.store(who == RFME_CLOCK_AUDIO && dev && booted, std::memory_order_seq_cst);
+        if (who == RFME_CLOCK_TIMER || who == RFME_CLOCK_AUDIO)
+            wake.signal();
+    }
+
+    rfme()
+    {
+        std::memset(noteKey, -1, sizeof noteKey);
+        std::memset(ledCol, -1, sizeof ledCol);
+        std::memset(ledLine, -1, sizeof ledLine);
+    }
+
+    // each keymap id's LED: (column, line) where the keymap has it on rows 1..4 (Device::led_level, precomputed)
+    void mapLeds(const int8_t *keymap)
+    {
+        std::memset(ledCol, -1, sizeof ledCol);
+        std::memset(ledLine, -1, sizeof ledLine);
+        if (!keymap)
+            return;
+        for (int r = 1; r <= FM1P_NLINE; r++)
+            for (int c = 0; c < FM1P_NCOL; c++) {
+                const int id = keymap[r * FM1P_NCOL + c];
+                if (id >= 0 && id < kNIds && ledCol[id] < 0) {
+                    ledCol[id] = (int8_t)c;
+                    ledLine[id] = (int8_t)(r - 1);
+                }
+            }
+    }
+
+    // the keys held by the unit and by host notes, to the device; a key newly down gets its velocity first
+    // (Processor.cpp pushKeys)
+    void pushKeys()
+    {
+        const uint32_t m = noteKeys | midiKeys;
+        if (m == appliedKeys)
+            return;
+        const uint32_t down = m & ~appliedKeys;
+        for (int k = 0; k < FM1P_NKEY; k++)
+            if ((down >> k) & 1u) {
+                const int v = (midiKeys >> k) & 1u ? midiVel[k] : (noteKeys >> k) & 1u ? (noteVel[k] ? noteVel[k] : kRemoteVel) : 0;
+                dev->key_vel(k, v);
+                lastVel.store((uint32_t)k << 8 | (uint32_t)v, std::memory_order_relaxed);
+            }
+        dev->keys(m);
+        appliedKeys = m;
+    }
+
+    void resetMidi()
+    {
+        midiKeys = appliedKeys = 0;
+        std::memset(noteKey, -1, sizeof noteKey);
+        std::memset(keyCount, 0, sizeof keyCount);
+        inR = inW = 0;
+    }
+
+    void flushMidiIn()
+    {
+        while (inR != inW && dev->midi_in(inRing[inR % kInRing]))
+            inR++;                                       // (0: no room in the core: retried after the next render)
+    }
+
+    // one message to the core's midi_in, as USB-MIDI packets
+    void toFirmware(const uint8_t *d, uint32_t n)
+    {
+        midiToCore.fetch_add(1, std::memory_order_relaxed);
+        toUsbPackets(d, n, [this](uint32_t p) {
+            if (inW - inR < kInRing)
+                inRing[inW++ % kInRing] = p;
+            else
+                midiInDropped.fetch_add(1, std::memory_order_relaxed);
+        });
+        flushMidiIn();
+    }
+
+    // ---- (M8) learn and the learned map (the clock's thread)
+    // the newest map, if rfme_set_midi_map gave one since: whatever the old one held is let go
+    // turned off (rfme_set_midi): let go of what it held, its pots start again when it is back on
+    void syncMap()
+    {
+        uint32_t held = 0;
+        if (const rfm::MapTable *t = mapIn.take())
+            mapper->adopt(*t, &held);
+        const bool on = mapOn.load(std::memory_order_relaxed);
+        if (on != mapWasOn) {
+            mapWasOn = on;
+            if (!on)
+                held |= mapper->rest();
+        }
+        for (int l = 0; l < FM1P_NB; l++)
+            if ((held >> l) & 1u)
+                mapButton(l, false);
+    }
+
+    // learn armed: a CC, a note-on, or the note-off of a note it took, to the learn queue (true: taken)
+    bool learnTake(const uint8_t *d, uint32_t n)
+    {
+        if (n < 3 || d[0] >= 0xF0)
+            return false;
+        const uint8_t st = d[0] & 0xF0, ch = d[0] & 0x0F, num = d[1] & 0x7F, v = d[2] & 0x7F;
+        const bool on = st == 0x90 && v > 0, off = st == 0x80 || (st == 0x90 && v == 0);
+        uint32_t &w = learnNotes[ch][num >> 5];
+        const uint32_t bit = 1u << (num & 31);
+        if (!learnArmed.load(std::memory_order_relaxed)) {
+            if (off)
+                w &= ~bit;
+            return false;
+        }
+        if (st == 0xB0)
+            mapper->seed(ch, num, v);                   // (an absolute pot turns from here once mapped)
+        else if (on)
+            w |= bit;
+        else if (off && (w & bit))
+            w &= ~bit;
+        else
+            return false;
+        (void)learnQ.push(LearnMsg{{d[0], num, v}});
+        midiLearned.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    // the map's action, as the panel's events (the matrix ids: the FM-1 mirror and the stats see it like a touch)
+    void mapButton(int label, bool down)
+    {
+        const uint8_t id = dev->panel()->btn_id[label];
+        if (id < FM1P_NBTN)
+            apply(panelEvent(RFM_EV_BUTTON, id, down ? 1 : 0));
+    }
+    void mapAct(const rfm::MidiMapper::Act &a)
+    {
+        switch (a.kind) {
+        case rfm::MidiMapper::Act::Turn: {
+            const uint8_t id = dev->panel()->enc_id[a.index];
+            if (id < FM1P_NENC)
+                apply(panelEvent(RFM_EV_ENC, id, (int16_t)(a.value < -32767 ? -32767 : a.value > 32767 ? 32767 : a.value)));
+            break;
+        }
+        case rfm::MidiMapper::Act::Button: mapButton(a.index, a.value != 0); break;
+        case rfm::MidiMapper::Act::Master:
+            masterPot = -1;
+            apply(panelEvent(RFM_EV_MASTER, 0, (int16_t)a.value));
+            break;
+        case rfm::MidiMapper::Act::Pickup:
+            masterPot = (int16_t)a.value;
+            if (a.first)
+                pickupSeq++;
+            break;
+        default: break;
+        }
+    }
+
+    // the controller's messages (rfme_midi_in), before the next chunk
+    void controllerMidi()
+    {
+        // a web manager's SysEx: as many packets as the core's input takes now, the rest at the next chunk
+        for (uint32_t p; inW - inR < kInRing && sysexQ.pop(p);)
+            inRing[inW++ % kInRing] = p;
+        flushMidiIn();
+        for (CtlEvent c; ctlQ.pop(c);) {
+            if (c.toFirmware)
+                toFirmware(c.data, c.len);
+            else
+                hostMidi(c.data, c.len);
+        }
+    }
+
+    // one host MIDI message (Processor.cpp handleMidi + forwardMidi); M8: learn, then the learned map (when on),
+    // first. Note-ons on the keys' channel (or any) play the keys; a note-off lets go of the key its note-on
+    // pressed, whatever the channel setting is now
+    void hostMidi(const uint8_t *d, uint32_t n)
+    {
+        if (n == 0 || !(d[0] & 0x80))
+            return;                                     // (counted when it came in: consume)
+        syncMap();
+        if (learnTake(d, n))
+            return;
+        rfm::MidiMapper::Act act;
+        if (mapWasOn && mapper->feed(d, n, masterV, act)) {   // (a mapped source is always consumed)
+            midiMapped.fetch_add(1, std::memory_order_relaxed);
+            mapAct(act);
+            return;
+        }
+        bool keyNote = false;
+        if (d[0] < 0xF0) {
+            const uint8_t st = d[0] & 0xF0, ch = d[0] & 0x0F;
+            const uint8_t note = n > 1 ? (d[1] & 0x7F) : 0, vel = n > 2 ? (d[2] & 0x7F) : 0;
+            const int kc = keyChannel.load(std::memory_order_relaxed);
+            const bool keysHere = kc == RFME_KEYS_ANY || kc == ch + 1;
+            if (st == 0x90 && n >= 3 && vel > 0) {
+                const int key = (int)note - kNoteBase + 12 * transpose.load(std::memory_order_relaxed);
+                if (keysHere && noteKey[ch][note] < 0 && key >= 0 && key < FM1P_NKEY) {
+                    noteKey[ch][note] = (int8_t)key;
+                    midiVel[key] = vel;
+                    keyCount[key]++;
+                    midiKeys |= 1u << key;
+                    keyNote = true;
+                    midiNotes.fetch_add(1, std::memory_order_relaxed);
+                }
+            } else if ((st == 0x80 && n >= 2) || (st == 0x90 && n >= 3)) {
+                const int key = noteKey[ch][note];
+                if (key >= 0) {
+                    noteKey[ch][note] = -1;
+                    if (keyCount[key] && --keyCount[key] == 0)
+                        midiKeys &= ~(1u << key);
+                    keyNote = true;
+                }
+            } else if (st == 0xB0 && n >= 3 && (d[1] == 123 || d[1] == 120)) {   // all notes off, all sound off
+                for (int k = 0; k < 128; k++) {
+                    const int key = noteKey[ch][k];
+                    if (key >= 0) {
+                        noteKey[ch][k] = -1;
+                        if (keyCount[key] && --keyCount[key] == 0)
+                            midiKeys &= ~(1u << key);
+                    }
+                }
+            }
+            pushKeys();
+        }
+        if (!keyNote || keyNotesToFw.load(std::memory_order_relaxed))
+            toFirmware(d, n);
+    }
+
+    // ---- the between hook (the clock thread)
+    void apply(const rfm_event_t &e)
+    {
+        fm1panel_t *h = dev->panel();
+        switch (e.type) {
+        case RFM_EV_KEY:
+            if (e.index < FM1P_NKEY) {
+                const uint32_t bit = 1u << e.index;
+                if (e.value) {
+                    if (!(noteKeys & bit))
+                        keysPressed.fetch_add(1, std::memory_order_relaxed);
+                    noteKeys |= bit;
+                    noteVel[e.index] = e.vel;                // (TOUCH: the key's own; 0: kRemoteVel)
+                } else {
+                    noteKeys &= ~bit;
+                    h->key_lean[e.index] = 0;
+                }
+                pushKeys();                                  // (its velocity first; a key newly down also taps)
+            }
+            break;
+        case RFM_EV_PRESS:                                   // (TOUCH) a held key's pressure, as rfm_panel_lean
+            if (e.index < FM1P_NKEY) {
+                const int p = e.value < 0 ? 0 : e.value > 127 ? 127 : e.value;
+                h->key_lean[e.index] = (uint8_t)((p * 100 + 63) / 127);
+                lastLean.store((uint32_t)e.index << 8 | h->key_lean[e.index], std::memory_order_relaxed);
+            }
+            break;
+        case RFM_EV_BUTTON:
+            if (e.index < FM1P_NBTN) {
+                matrixButtons = e.value ? matrixButtons | 1u << e.index : matrixButtons & ~(1u << e.index);
+                int label = -1;                              // matrix id -> label (panel->btn_id)
+                for (int l = 0; l < FM1P_NB && label < 0; l++)
+                    if (h->btn_id[l] == e.index)
+                        label = l;
+                if (label >= 0) {
+                    labels = e.value ? labels | 1u << label : labels & ~(1u << label);
+                    dev->buttons(labels);
+                }
+            }
+            break;
+        case RFM_EV_ENC:
+            if (e.index < FM1P_NENC && e.value) {
+                int role = -1;                               // matrix encoder -> knob role (panel->enc_id)
+                for (int r = 0; r < FM1P_NE - 1 && role < 0; r++)
+                    if (h->enc_id[r] == e.index)
+                        role = r;
+                if (role >= 0)                               // (Device::enc multiplies by enc_dir: undone)
+                    dev->enc(role, e.value * (h->enc_dir[role] < 0 ? -1 : 1));
+                else
+                    h->enc[e.index] += e.value;
+            }
+            break;
+        case RFM_EV_MASTER:
+            masterV = e.value < 0 ? 0 : e.value > 1023 ? 1023 : e.value;
+            dev->master(masterV);
+            break;
+        case RemoteLink::kEvRelease:                         // the session ended: nothing is held any more
+            noteKeys = labels = matrixButtons = 0;
+            for (int k = 0; k < FM1P_NKEY; k++)
+                h->key_lean[k] = 0;
+            pushKeys();                                      // (the host's notes stay down)
+            dev->buttons(0);
+            break;
+        default:
+            return;
+        }
+        applied.fetch_add(1, std::memory_order_relaxed);
+        if (owner && attached.load(std::memory_order_relaxed)) {
+            rfmc_external_event(owner, e);
+            rfmc_external_panel(owner, noteKeys, matrixButtons, masterV);
+        }
+    }
+
+    // the LCD and LEDs: to the FM-1 (at most every kPeriodMs, whole on request) and to the preview (at most every
+    // kPreviewMs), each only when they changed
+    void publish(uint32_t ms)
+    {
+        const fm1panel_t *h = dev->panel();
+        const bool engaged = link && attached.load(std::memory_order_relaxed) && link->engaged();
+        if (!engaged)
+            linkValid = false;
+        const bool linkFull = engaged && (link->takeFullRequest() || !linkValid);
+        const bool linkDue = engaged && (linkFull || ms - lastLinkPub >= kPeriodMs);
+        const bool viewDue = !pubValid || ms - lastPub >= kPreviewMs;
+        if (!linkDue && !viewDue)
+            return;
+        rfm_leds_t l;
+        remoteLeds(h, l);
+        const uint32_t writes = h->lcd_writes;
+        if (linkDue && (linkFull || writes != lastLinkWrites || !rfm_leds_equal(&l, &lastLinkLeds))) {
+            RemoteSnapshot &s = link->back();
+            std::memcpy(s.lcd, h->lcd, sizeof s.lcd);
+            s.leds = l;
+            s.seq = ++linkPubs;
+            link->publish();
+            linkValid = true;
+            lastLinkPub = ms;
+            lastLinkWrites = writes;
+            lastLinkLeds = l;
+        }
+        if (viewDue && (!pubValid || writes != lastWrites || !rfm_leds_equal(&l, &lastLeds))) {
+            Preview &p = preview.back();
+            std::memcpy(p.lcd, h->lcd, sizeof p.lcd);
+            p.leds = l;
+            p.seq = ++pubSeq;
+            p.devMs = ms;
+            preview.publish();
+            lastPub = ms;
+            lastWrites = writes;
+            lastLeds = l;
+            pubValid = true;
+            snapshots.fetch_add(1, std::memory_order_relaxed);
+            lcdWrites.store(writes, std::memory_order_relaxed);
+        }
+    }
+
+    // the on-screen panel's state, when it changed (rfme_panel)
+    void publishPanel(uint32_t ms)
+    {
+        if (ms - lastPanel < kPanelMs && panelLast.seq != 0)
+            return;
+        lastPanel = ms;
+        const fm1panel_t *h = dev->panel();
+        rfme_panel_t p{};
+        p.booted = 1;
+        p.keys = appliedKeys;
+        p.labels = labels;
+        for (int r = 0; r < FM1P_NE - 1; r++)
+            p.enc[r] = dev->enc_total(r) * (h->enc_dir[r] < 0 ? -1 : 1);   // (enc_total counts in enc_dir's sense)
+        p.master = h->master;
+        auto level = [&](int id) -> uint8_t {
+            return id >= 0 && id < kNIds && ledCol[id] >= 0 ? h->led[ledCol[id]][ledLine[id]] : 0;
+        };
+        for (int k = 0; k < FM1P_NKEY; k++)
+            p.key_led[k] = level(FM1P_NBTN + k);
+        for (int b = 0; b < FM1P_NB; b++)
+            p.btn_led[b] = level(h->btn_id[b]);
+        p.play_green = h->led_play_green;
+        p.master_pot = masterPot;
+        p.pickup_seq = pickupSeq;
+        p.seq = panelLast.seq;
+        if (panelLast.seq != 0 && std::memcmp(&p, &panelLast, sizeof p) == 0)
+            return;
+        p.seq = panelLast.seq + 1;
+        panelLast = p;
+        panelOut.back() = p;
+        panelOut.publish();
+    }
+
+    void between(uint32_t ms, bool)
+    {
+        rfm_event_t ev;
+        if (link && attached.load(std::memory_order_relaxed)) {
+            while (link->popEvent(ev))
+                apply(ev);
+            // the unit's TRS MIDI in (MIDI_IN): straight to the core's midi_in, as the website's site.midiIn (not
+            // learnt, not mapped, no keys: it is the firmware's own MIDI in)
+            for (RemoteLink::MidiMsg m; link->popMidi(m);)
+                toFirmware(m.data, m.len);
+        }
+        while (in.pop(ev))
+            apply(ev);
+        syncMap();                                       // (M8: a new map lets go of what the old one held)
+        devMs.store(ms, std::memory_order_relaxed);
+        // (kept while the audio ring is made, for the AU; 2: on every clock, for the app's web managers)
+        const int outOn = midiOutOn.load(std::memory_order_relaxed);
+        const bool keep = outOn == 2 || (producing && outOn == 1);
+        for (uint32_t pkt; dev->midi_out_take(&pkt);) {    // (M4: for the AU's MIDI output; else counted, dropped)
+            midiOut.fetch_add(1, std::memory_order_relaxed);
+            if (keep)
+                (void)midiOutQ.push(OutPacket{outAt + dev->render_frame(), pkt});   // (its frame in the ring)
+        }
+        if (!halted.load(std::memory_order_relaxed) && dev->halted()) {
+            haltCode.store((uint32_t)dev->core().halted(), std::memory_order_relaxed);
+            halted.store(true, std::memory_order_release);
+        }
+        if (ms - lastStats >= kStatsEveryMs) {
+            lastStats = ms;
+            uint32_t s = 0, c = 0;
+            if (dev->core().stats(&s, &c)) {
+                shed.store(s, std::memory_order_relaxed);
+                cpuPct.store(c, std::memory_order_relaxed);
+                haveStats.store(1, std::memory_order_relaxed);
+            }
+            flashDirty.store(dev->flash_dirty(), std::memory_order_relaxed);
+        }
+        publish(ms);
+        publishPanel(ms);
+        // the flash (fm1remote: every 30 device s when flash_dirty moved; here also when asked, flash_sync first)
+        if (!flashCopy.empty() && dev->flash() && !flashReady.load(std::memory_order_acquire)) {
+            if (flashReq.load(std::memory_order_acquire)) {
+                flashReq.store(false, std::memory_order_relaxed);
+                dev->flash_sync();
+                copyFlash();
+            } else if (ms - lastFlashCheck >= kFlashEveryMs) {
+                lastFlashCheck = ms;
+                if (dev->flash_dirty() != savedDirty)
+                    copyFlash();
+            }
+        }
+    }
+
+    void copyFlash()
+    {
+        std::memcpy(flashCopy.data(), dev->flash(), flashCopy.size());
+        savedDirty = dev->flash_dirty();
+        flashCopies.fetch_add(1, std::memory_order_relaxed);
+        flashReady.store(true, std::memory_order_release);
+    }
+
+    // ---- the core thread
+    // (a pthread for its stack size: an interpreted core recurses on the native stack, and std::thread's is 512 KiB)
+    static constexpr size_t kStack = 4u << 20;
+    void startThread()
+    {
+        if (threadStarted)
+            return;
+        pthread_attr_t a;
+        pthread_attr_init(&a);
+        pthread_attr_setstacksize(&a, kStack);
+        threadStarted = pthread_create(&thread, &a, [](void *p) -> void * {
+            static_cast<rfme *>(p)->coreLoop();
+            return nullptr;
+        }, this) == 0;
+        pthread_attr_destroy(&a);
+    }
+    void joinThread()
+    {
+        if (!threadStarted)
+            return;
+        quit.store(true, std::memory_order_release);
+        wake.signal();
+        pthread_join(thread, nullptr);                  // (its waits are bounded: at most ~50 ms)
+        threadStarted = false;
+    }
+
+    void coreLoop()
+    {
+        gCoreThreads.fetch_add(1);
+        pthread_setname_np(pthread_self(), "RFM core");
+        uint32_t period = ~0u;
+        for (;;) {
+            if (quit.load(std::memory_order_acquire))
+                break;
+            const uint32_t want = periodUs.load(std::memory_order_relaxed);
+            if (want != period) {                       // (real time, its period the host buffer's: when it changes)
+                period = want;
+                rtOk.store(rfm::setRealtime(want ? want * 1e-6 : 0), std::memory_order_relaxed);
+            }
+            const int c = clock.load(std::memory_order_seq_cst);
+            if (c == RFME_CLOCK_AUDIO) {
+                produce();
+                wake.wait_us(20000);
+            } else if (c == RFME_CLOCK_TIMER) {
+                timerStep();
+                wake.wait_us(2000);
+            } else {
+                wake.wait_us(50000);
+            }
+        }
+        gCoreThreads.fetch_sub(1);
+    }
+
+    // the timer clock (no audio: the device runs by the wall clock, its sound dropped)
+    std::chrono::steady_clock::time_point t0;
+    uint32_t ms0 = 0;
+    void timerStep()
+    {
+        using clk = std::chrono::steady_clock;
+        Scope cs(this, RFME_CLOCK_TIMER);
+        if (!cs.ok)
+            return;
+        controllerMidi();
+        if (timerRebase) {
+            timerRebase = false;
+            t0 = clk::now();
+            ms0 = dev->ms();
+        }
+        const uint32_t target =
+            ms0 + (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(clk::now() - t0).count();
+        for (int k = 0; k < 200 && (int32_t)(target - dev->ms()) > 0; k++)
+            dev->run_ms();
+        if ((int32_t)(target - dev->ms()) > 200)        // (far behind: start counting again from here)
+            timerRebase = true;
+        dev->discard();
+        noteFrameStats();
+    }
+
+    // the longest frame() so far, for rfme_status (the clock's thread)
+    void noteFrameStats()
+    {
+        if (coreReset.exchange(false, std::memory_order_relaxed)) {
+            dev->reset_frame_stats();
+            coreTicks.store(0, std::memory_order_relaxed);
+            coreWakes.store(0, std::memory_order_relaxed);
+            coreFrames.store(0, std::memory_order_relaxed);
+            coreMaxTicks.store(0, std::memory_order_relaxed);
+        }
+        frameMaxTicks.store(dev->frame_ticks_max(), std::memory_order_relaxed);
+    }
+
+    // RFME_CLOCK_AUDIO: the ring filled up to its target, host events applied at their positions
+    void produce()
+    {
+        Scope cs(this, RFME_CLOCK_AUDIO);
+        if (!cs.ok)
+            return;
+        const uint32_t ep = epoch.load(std::memory_order_acquire);
+        if (ep != pEpoch) {                             // a new stream: from here
+            pEpoch = ep;
+            dropStale();                                // (what the old one queued goes; this one's own stays)
+            epochStart.store(posW.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            prodEpoch.store(ep, std::memory_order_release);
+        }
+        const double rate = hostRate.load(std::memory_order_relaxed);
+        if (!(rate > 0))
+            return;                                     // (no render yet: its rate is unknown)
+        producing = true;
+        const uint64_t t0 = rfm::nowTicks();
+        uint64_t made = 0;
+        while (clock.load(std::memory_order_relaxed) == RFME_CLOCK_AUDIO) {
+            const uint64_t w = posW.load(std::memory_order_relaxed);
+            const uint64_t fill = w - posR.load(std::memory_order_acquire);
+            const uint32_t tgt = target.load(std::memory_order_relaxed);
+            if (fill >= tgt || fill + kChunk > kRingFrames)
+                break;
+            renderChunk(w, kChunk, rate);
+            posW.store(w + kChunk, std::memory_order_release);
+            made += kChunk;
+            if (offlineWaiting.load(std::memory_order_acquire))
+                produced.signal();
+        }
+        producing = false;
+        if (made) {
+            const uint64_t dt = rfm::nowTicks() - t0;
+            coreTicks.fetch_add(dt, std::memory_order_relaxed);
+            coreWakes.fetch_add(1, std::memory_order_relaxed);
+            coreFrames.fetch_add(made, std::memory_order_relaxed);
+            if (dt > coreMaxTicks.load(std::memory_order_relaxed))
+                coreMaxTicks.store(dt, std::memory_order_relaxed);
+        }
+        noteFrameStats();
+    }
+
+    // host events stamped in an earlier stream (a render that began before the core or the clock changed) are
+    // dropped: they were meant for the core that is gone. The current stream's are kept, also those the consumer
+    // queued before this thread noticed the new epoch (the very first renders: never dropped). (The consumer's
+    // epochs only grow, so the stale ones are at the front)
+    void dropStale()
+    {
+        for (HostEvent he; hostQ.peek(he) && he.epoch != pEpoch;)
+            hostQ.pop(he);
+    }
+    bool nextHost(HostEvent &he)
+    {
+        dropStale();
+        return hostQ.peek(he);
+    }
+
+    // n frames at ring position w (the device's render split at each host event due inside). An event whose
+    // position is already past (stamped before the stream started) is applied at once, in order
+    void renderChunk(uint64_t w, uint32_t n, double rate)
+    {
+        uint64_t pos = w;
+        const uint64_t end = w + n;
+        HostEvent he;
+        controllerMidi();                               // (M8: a controller's MIDI, at the chunk's start)
+        while (pos < end) {
+            while (nextHost(he) && he.at <= pos) {
+                hostQ.pop(he);
+                if (he.len)
+                    hostMidi(he.data, he.len);
+            }
+            const uint64_t next = nextHost(he) && he.at < end ? he.at : end;
+            outAt = pos;
+            const uint32_t k = (uint32_t)(next - pos);
+            const uint32_t i = (uint32_t)(pos & (kRingFrames - 1));
+            const uint32_t first = k < kRingFrames - i ? k : kRingFrames - i;
+            dev->render(bufL.get() + i, bufR.get() + i, first, rate);
+            if (k > first) {                            // (the ring wraps)
+                outAt = pos + first;
+                dev->render(bufL.get(), bufR.get(), k - first, rate);
+            }
+            pos = next;
+        }
+        flushMidiIn();
+    }
+
+    // ---- the audio callback (RFME_CLOCK_AUDIO): the ring into L and R, host events queued. Real-time safe:
+    // atomics, a copy, one semaphore signal (offline: bounded waits for the core thread)
+    void retarget()
+    {
+        const uint32_t buf = cMaxN > minBuffer.load(std::memory_order_relaxed) ? cMaxN : minBuffer.load(std::memory_order_relaxed);
+        const uint32_t head = (uint32_t)std::ceil((double)headroomUs.load(std::memory_order_relaxed) * cRate * 1e-6);
+        uint32_t t = buf + head;
+        if (t > kRingFrames - 2 * kChunk)
+            t = kRingFrames - 2 * kChunk;
+        t = (t + kChunk - 1) / kChunk * kChunk;         // (whole chunks)
+        target.store(t, std::memory_order_relaxed);
+        latency.store(t + kChunk, std::memory_order_relaxed);
+        periodUs.store(cRate > 0 ? (uint32_t)((double)cMaxN * 1e6 / cRate) : 0, std::memory_order_relaxed);
+    }
+
+    // offline: waits (bounded) until cond() holds or the stream stops
+    template <typename Cond> void waitFor(Cond &&cond)
+    {
+        offlineWaiting.store(true, std::memory_order_seq_cst);
+        uint32_t waited = 0;
+        while (!cond() && audioLive.load(std::memory_order_acquire) && waited < kOfflineWaitUs) {
+            wake.signal();
+            produced.wait_us(1000);
+            waited += 1000;
+        }
+        offlineWaiting.store(false, std::memory_order_relaxed);
+    }
+
+    int consume(float *L, float *R, uint32_t n, double rate, const rfme_midi_t *ev, uint32_t nev)
+    {
+        const bool off = offline.load(std::memory_order_relaxed);
+        bool changed = false;
+        const uint32_t ep = epoch.load(std::memory_order_acquire);
+        if (ep != cEpoch) {                             // (a new stream: primed again, its buffer size learnt again)
+            cEpoch = ep;
+            primed = false;
+            cMaxN = 0;
+            cLastAt = 0;
+            changed = true;
+        }
+        if (rate != cRate) {                            // (a new rate: what was rendered at the old one goes)
+            cRate = rate;
+            hostRate.store(rate, std::memory_order_relaxed);
+            posR.store(posW.load(std::memory_order_acquire), std::memory_order_release);
+            primed = false;
+            changed = true;
+        }
+        if (n > cMaxN) {
+            cMaxN = n;
+            changed = true;
+        }
+        if (retargetReq.exchange(false, std::memory_order_relaxed))
+            changed = true;
+        if (changed)
+            retarget();
+        if (fillReset.exchange(false, std::memory_order_relaxed))
+            fillMin.store(~0u, std::memory_order_relaxed);
+        const bool live = audioLive.load(std::memory_order_acquire);
+        uint64_t r = posR.load(std::memory_order_relaxed);
+        outBase = outEnd = r;
+        outN = n;
+        if (!primed && live && prodEpoch.load(std::memory_order_acquire) == ep) {
+            const uint64_t from = epochStart.load(std::memory_order_relaxed);
+            if (r < from) {                             // (the old stream's tail: skipped)
+                r = from;
+                posR.store(r, std::memory_order_release);
+                outBase = outEnd = r;
+            }
+        }
+        if (live) {                                     // host MIDI, stamped with its ring position
+            // (and this stream's epoch. Before the ring is primed r stands still: a later render's event is never
+            // stamped before an earlier one's)
+            const uint64_t lat = latency.load(std::memory_order_relaxed);
+            auto at = [&](uint32_t off) {
+                const uint64_t a = r + (off < n ? off : (n ? n - 1 : 0)) + lat;
+                return cLastAt = a > cLastAt ? a : cLastAt;
+            };
+            for (uint32_t i = 0; i < nev; i++) {        // (in frame order)
+                const rfme_midi_t &m = ev[i];
+                if (m.len == 0 || !(m.data[0] & 0x80))
+                    continue;
+                HostEvent he{at(m.offset), (uint8_t)(m.len > 3 ? 3 : m.len), {m.data[0], m.data[1], m.data[2]}, 0, 0, ep};
+                if (hostQ.push(he))
+                    midiInCount.fetch_add(1, std::memory_order_relaxed);
+                else
+                    midiInDropped.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        const uint32_t tgt = target.load(std::memory_order_relaxed);
+        auto filled = [&] { return posW.load(std::memory_order_acquire) - r >= tgt && prodEpoch.load(std::memory_order_acquire) == ep; };
+        if (!primed && live) {
+            if (off)
+                waitFor(filled);
+            primed = filled();
+        }
+        if (!primed) {
+            if (live)
+                wake.signal();
+            std::memset(L, 0, n * sizeof *L);
+            if (R && R != L)
+                std::memset(R, 0, n * sizeof *R);
+            return 0;
+        }
+        if (off && live)
+            waitFor([&] { return posW.load(std::memory_order_acquire) - r >= n; });
+        const uint64_t avail = posW.load(std::memory_order_acquire) - r;
+        if (live && avail < fillMin.load(std::memory_order_relaxed))   // (a stopped clock drains it: not counted)
+            fillMin.store((uint32_t)avail, std::memory_order_relaxed);
+        const uint32_t k = avail < n ? (uint32_t)avail : n;
+        const uint32_t i = (uint32_t)(r & (kRingFrames - 1));
+        const uint32_t first = k < kRingFrames - i ? k : kRingFrames - i;
+        std::memcpy(L, bufL.get() + i, first * sizeof *L);
+        std::memcpy(L + first, bufL.get(), (k - first) * sizeof *L);
+        if (R) {
+            std::memcpy(R, bufR.get() + i, first * sizeof *R);
+            std::memcpy(R + first, bufR.get(), (k - first) * sizeof *R);
+        }
+        if (k < n) {                                    // an underrun: silence for what the core hasn't made yet
+            std::memset(L + k, 0, (n - k) * sizeof *L);
+            if (R)
+                std::memset(R + k, 0, (n - k) * sizeof *R);
+            if (live) {
+                underruns.fetch_add(1, std::memory_order_relaxed);
+                underrunFrames.fetch_add(n - k, std::memory_order_relaxed);
+            }
+        }
+        posR.store(r + k, std::memory_order_release);
+        outEnd = r + k;
+        if (!live && k == 0)
+            primed = false;                             // (stopped and drained)
+        wake.signal();
+        return k > 0;
+    }
+
+    // the MIDI out the last render played up to: one packet and its frame in that render
+    bool midiOutTake(uint32_t *pkt, uint32_t *offset)
+    {
+        OutPacket o;
+        if (!midiOutQ.peek(o))
+            return false;
+        // (with the audio clock a packet waits until the audio it belongs to has played; mode 2 without it: at once)
+        const bool now = midiOutOn.load(std::memory_order_relaxed) == 2 && !audioLive.load(std::memory_order_acquire);
+        if (!now && o.at >= outEnd)
+            return false;
+        midiOutQ.pop(o);
+        *pkt = o.pkt;
+        if (offset)
+            *offset = o.at > outBase ? (uint32_t)(o.at - outBase) < outN ? (uint32_t)(o.at - outBase) : (outN ? outN - 1 : 0) : 0;
+        return true;
+    }
+
+    // ---- the control thread, the clock stopped
+    void unloadStopped()
+    {
+        {
+            std::lock_guard<std::mutex> g(coreLock);    // (no other thread reads this core's names any more)
+            dev.reset();
+            booted = false;
+            halted.store(false);
+            haltCode.store(0);
+            core.reset();                               // (shutdown(); a native slot: dlclose, given back)
+            namesGen.fetch_add(1);
+        }
+    }
+
+    // a new backend from the factory, and its device; false with a message
+    bool makeStopped(std::string *msg)
+    {
+        std::unique_ptr<rfm::CoreBackend> c = factory ? factory(msg) : nullptr;
+        if (!c)
+            return false;
+        if (stallUs)
+            c = rfm::stallingCore(std::move(c), stallUs);
+        std::lock_guard<std::mutex> g(coreLock);
+        core = std::move(c);
+        dev = std::make_unique<rfm::CoreDevice>(*core);
+        namesGen.fetch_add(1);
+        return true;
+    }
+
+    void bootStopped(const uint8_t *bytes, uint32_t n)
+    {
+        dev->boot_from(bytes && n ? bytes : nullptr, bytes ? n : 0);
+        noteKeys = labels = matrixButtons = 0;
+        resetMidi();
+        for (CtlEvent c; ctlQ.pop(c);) {                // (the clock stopped: this thread is the consumer now)
+        }
+        for (uint32_t p; sysexQ.pop(p);) {
+        }
+        std::memset(learnNotes, 0, sizeof learnNotes);
+        mapper->release();                              // (the map kept; nothing it held is held now)
+        masterPot = -1;
+        masterV = -1;
+        pubValid = linkValid = false;
+        lastPub = lastLinkPub = lastFlashCheck = lastStats = 0;
+        lastPanel = 0;
+        panelLast.booted = 0;                            // (differs from the first state: published again)
+        const rfm::CoreDesc &d = core->info();
+        mapLeds(d.has_keymap ? d.keymap.data() : nullptr);
+        const fm1panel_t *h = dev->panel();
+        std::memcpy(btnId, h->btn_id, sizeof btnId);
+        std::memcpy(encId, h->enc_id, sizeof encId);
+        flashCopy.assign(dev->flash_size(), 0);
+        savedDirty = dev->flash_dirty();
+        halted.store(false);
+        haltCode.store(0);
+        dev->set_between([this](uint32_t ms, bool frame) { between(ms, frame); });
+        booted = true;
+        if (link)
+            link->invalidateScreen();                   // (a new device: the unit's screen resent whole)
+    }
+};
+
+namespace rfm {
+
+bool engineLoad(rfme_t *e, CoreFactory factory, std::string *err)
+{
+    const int prev = e->stop();
+    e->unloadStopped();
+    e->factory = std::move(factory);
+    const bool ok = e->makeStopped(err);
+    if (!ok)
+        e->factory = nullptr;
+    e->resume(prev, true);
+    return ok;
+}
+
+} // namespace rfm
+
+extern "C" {
+
+rfme_t *rfme_new(rfmc_t *link)
+{
+    auto *e = new rfme;
+    e->owner = link;
+    e->link = link ? rfmc_link(link) : nullptr;
+    return e;
+}
+
+void rfme_free(rfme_t *e)
+{
+    if (!e)
+        return;
+    e->stop();
+    if (e->attached.exchange(false) && e->owner)
+        rfmc_set_external(e->owner, 0);
+    e->joinThread();
+    e->unloadStopped();
+    delete e;
+}
+
+int rfme_load(rfme_t *e, const char *core_id, char *err, uint32_t n)
+{
+    std::string msg;
+    if (rfm::engineLoad(e, rfm::nativeCoreFactory(core_id ? core_id : ""), &msg))
+        return 1;
+    putErr(err, n, msg);
+    return 0;
+}
+
+int rfme_boot(rfme_t *e, const uint8_t *flash, uint32_t n)
+{
+    if (!e->dev || e->booted)
+        return 0;
+    const int prev = e->stop();
+    e->bootStopped(flash, n);
+    e->resume(prev, true);
+    return 1;
+}
+
+void rfme_unload(rfme_t *e)
+{
+    const int prev = e->stop();
+    e->unloadStopped();
+    e->resume(prev, true);
+}
+
+int rfme_power_cycle(rfme_t *e, char *err, uint32_t n)
+{
+    if (!e->core || !e->factory) {
+        putErr(err, n, "no core loaded");
+        return 0;
+    }
+    const int prev = e->stop();
+    std::vector<uint8_t> image;
+    if (e->booted && e->dev->flash()) {             // (FM1VST powerCycleLocked: the current flash, synced)
+        e->dev->flash_sync();
+        image.assign(e->dev->flash(), e->dev->flash() + e->dev->flash_size());
+    }
+    e->unloadStopped();
+    std::string msg;
+    if (!e->makeStopped(&msg)) {
+        putErr(err, n, msg);
+        e->resume(prev, true);
+        return 0;
+    }
+    e->bootStopped(image.empty() ? nullptr : image.data(), (uint32_t)image.size());
+    if (!image.empty() && image.size() == e->flashCopy.size()) {   // (offered for saving)
+        std::memcpy(e->flashCopy.data(), image.data(), image.size());
+        e->flashReady.store(true, std::memory_order_release);
+    }
+    e->resume(prev, true);
+    return 1;
+}
+
+void rfme_attach(rfme_t *e, int on)
+{
+    const int prev = e->stop();
+    if (e->attached.exchange(on != 0) != (on != 0) && e->owner) {
+        if (!on && e->booted) {                         // (what the unit held lets go; the host's notes stay)
+            e->noteKeys = e->labels = e->matrixButtons = 0;
+            e->pushKeys();
+            e->dev->buttons(0);
+        }
+        e->linkValid = false;
+        rfmc_set_external(e->owner, on);
+    }
+    e->resume(prev, false);
+}
+
+void rfme_set_clock(rfme_t *e, int owner)
+{
+    const int prev = e->stop();
+    e->resume(owner, prev != owner);
+}
+
+int rfme_clock(rfme_t *e) { return e->clock.load(); }
+
+uint32_t rfme_stream(rfme_t *e)
+{
+    return e->audioLive.load(std::memory_order_acquire) ? e->epoch.load(std::memory_order_acquire) << 1 | 1u : 0;
+}
+
+void rfme_render(rfme_t *e, float *L, float *R, uint32_t n, double rate) { rfme_render_midi(e, L, R, n, rate, nullptr, 0); }
+
+int rfme_render_midi(rfme_t *e, float *L, float *R, uint32_t n, double rate, const rfme_midi_t *ev, uint32_t nev)
+{
+    const uint64_t t0 = rfm::nowTicks();
+    const int ok = e->consume(L, R, n, rate, ev, nev);
+    const uint64_t dt = rfm::nowTicks() - t0;
+    const uint32_t us = (uint32_t)((double)dt * e->usPerTick);
+    e->renders.fetch_add(1, std::memory_order_relaxed);
+    e->renderFrames.fetch_add(n, std::memory_order_relaxed);
+    e->renderTicks.fetch_add(dt, std::memory_order_relaxed);
+    e->renderLastUs.store(us, std::memory_order_relaxed);
+    e->renderLastFrames.store(n, std::memory_order_relaxed);
+    if (us > e->renderMaxUs.load(std::memory_order_relaxed))
+        e->renderMaxUs.store(us, std::memory_order_relaxed);
+    e->rate.store(rate, std::memory_order_relaxed);
+    return ok;
+}
+
+void rfme_set_latency(rfme_t *e, uint32_t headroom_us, uint32_t min_buffer_frames)
+{
+    e->headroomUs.store(headroom_us);
+    e->minBuffer.store(min_buffer_frames);
+    e->retargetReq.store(true);                         // (the next render sets the target)
+}
+
+uint32_t rfme_latency(rfme_t *e, double rate, uint32_t buffer)
+{
+    if (const uint32_t l = e->latency.load())
+        return l;
+    const uint32_t mb = e->minBuffer.load();
+    uint32_t t = (buffer > mb ? buffer : mb) + (uint32_t)std::ceil((double)e->headroomUs.load() * rate * 1e-6);
+    t = (t + kChunk - 1) / kChunk * kChunk;
+    return t + kChunk;
+}
+
+void rfme_set_offline(rfme_t *e, int on) { e->offline.store(on != 0); }
+
+void rfme_set_midi(rfme_t *e, int key_channel, int transpose, int key_notes_to_firmware, int use_map)
+{
+    e->keyChannel.store(key_channel < RFME_KEYS_OFF || key_channel > 16 ? RFME_KEYS_OFF : key_channel);
+    e->mapOn.store(use_map != 0);
+    e->transpose.store(transpose < -2 ? -2 : transpose > 2 ? 2 : transpose);
+    e->keyNotesToFw.store(key_notes_to_firmware != 0);
+}
+
+void rfme_midi_out_enable(rfme_t *e, int on) { e->midiOutOn.store(on <= 0 ? 0 : on >= 2 ? 2 : 1); }
+
+int rfme_midi_in(rfme_t *e, const uint8_t *data, uint32_t len, int to_firmware)
+{
+    if (!data || len == 0 || len > 3 || !(data[0] & 0x80) || data[0] == 0xF0 || data[0] == 0xF7)
+        return 0;
+    const CtlEvent c{(uint8_t)(to_firmware ? 1 : 0), (uint8_t)len,
+                     {data[0], len > 1 ? data[1] : (uint8_t)0, len > 2 ? data[2] : (uint8_t)0}};
+    bool ok;
+    {
+        std::lock_guard<std::mutex> g(e->ctlLock);
+        ok = e->ctlQ.push(c);
+    }
+    (ok ? e->midiInCount : e->midiInDropped).fetch_add(1, std::memory_order_relaxed);
+    return ok ? 1 : 0;
+}
+
+int rfme_sysex_in(rfme_t *e, const uint8_t *data, uint32_t len)
+{
+    if (!data || len < 2 || data[0] != 0xF0 || data[len - 1] != 0xF7)
+        return 0;
+    for (uint32_t i = 1; i + 1 < len; i++)
+        if (data[i] & 0x80)
+            return 0;                                   // (a status byte inside: not one SysEx message)
+    std::lock_guard<std::mutex> g(e->ctlLock);
+    if ((len + 2) / 3 > 4096 - e->sysexQ.size())
+        return 0;                                       // (no room now: the caller tries again)
+    // USB-MIDI: CIN 4 for three bytes that go on, 5 / 6 / 7 for the last one, two or three (cable 0)
+    for (uint32_t i = 0; i < len; i += 3) {
+        const uint32_t left = len - i, n = left > 3 ? 3 : left;
+        const uint32_t cin = left > 3 ? 4u : (n == 1 ? 5u : n == 2 ? 6u : 7u);
+        uint32_t p = cin | (uint32_t)data[i] << 8;
+        if (n > 1) p |= (uint32_t)data[i + 1] << 16;
+        if (n > 2) p |= (uint32_t)data[i + 2] << 24;
+        e->sysexQ.push(p);
+    }
+    e->midiInCount.fetch_add(1, std::memory_order_relaxed);
+    return 1;
+}
+
+void rfme_set_midi_map(rfme_t *e, const rfme_map_entry_t *map, uint32_t n, float speed)
+{
+    rfm::MapTable &t = e->mapIn.back();
+    t.n = map ? (n < rfm::kMapMax ? n : rfm::kMapMax) : 0;
+    if (t.n)
+        std::memcpy(t.e, map, t.n * sizeof *map);
+    t.speed = speed;
+    e->mapIn.publish();
+}
+
+void rfme_learn(rfme_t *e, int armed) { e->learnArmed.store(armed != 0); }
+
+int rfme_learn_take(rfme_t *e, uint8_t msg[3])
+{
+    LearnMsg m;
+    if (!e->learnQ.pop(m))
+        return 0;
+    if (msg)
+        std::memcpy(msg, m.data, 3);
+    return 1;
+}
+
+int rfme_midi_out_take(rfme_t *e, uint32_t *pkt) { return e->midiOutTake(pkt, nullptr) ? 1 : 0; }
+
+int rfme_midi_out_take_at(rfme_t *e, uint32_t *pkt, uint32_t *offset) { return e->midiOutTake(pkt, offset) ? 1 : 0; }
+
+void rfme_run_ms(rfme_t *e, uint32_t ms, rfme_audio_t *out)
+{
+    rfme_audio_t a{};
+    a.hash = 2166136261u;
+    double sum = 0;
+    rfme::Scope cs(e, RFME_CLOCK_CALLER);
+    if (cs.ok) {
+        e->controllerMidi();
+        int16_t buf[2 * 256];
+        for (uint32_t i = 0; i < ms; i++) {
+            e->dev->run_ms();
+            for (uint32_t got; (got = e->dev->take_s16(buf, 256)) > 0;) {
+                for (uint32_t k = 0; k < 2 * got; k++) {
+                    const int32_t v = buf[k];
+                    a.hash = (a.hash ^ (uint16_t)v) * 16777619u;
+                    sum += (double)v * v;
+                    const int32_t m = v < 0 ? -v : v;
+                    if (m > a.peak)
+                        a.peak = m;
+                }
+                a.frames += got;
+            }
+        }
+    }
+    a.rms = a.frames ? std::sqrt(sum / (2.0 * (double)a.frames)) / 32768.0 : 0.0;
+    if (out)
+        *out = a;
+}
+
+int rfme_event(rfme_t *e, uint8_t type, uint8_t index, int16_t value)
+{
+    return rfme_event_vel(e, type, index, value, 0);
+}
+
+int rfme_event_vel(rfme_t *e, uint8_t type, uint8_t index, int16_t value, uint8_t vel)
+{
+    rfm_event_t ev{};
+    ev.vel = vel;
+    ev.type = type;
+    ev.index = index;
+    ev.value = value;
+    if (e->in.push(ev))
+        return 1;
+    e->dropped.fetch_add(1, std::memory_order_relaxed);
+    return 0;
+}
+
+int rfme_matrix_button(rfme_t *e, int label)
+{
+    return e->booted && label >= 0 && label < FM1P_NB ? e->btnId[label] : -1;
+}
+
+int rfme_matrix_encoder(rfme_t *e, int role)
+{
+    return e->booted && role >= 0 && role < FM1P_NE - 1 ? e->encId[role] : -1;
+}
+
+void rfme_status(rfme_t *e, rfme_status_t *st)
+{
+    std::memset(st, 0, sizeof *st);
+    st->loaded = e->core != nullptr;
+    st->booted = e->booted;
+    st->halted = e->halted.load();
+    st->halt_code = e->haltCode.load();
+    st->clock = e->clock.load();
+    st->attached = e->attached.load();
+    st->slot = e->core ? e->core->slot() : 0;
+    if (e->core) {
+        putErr(st->core_id, sizeof st->core_id, e->core->info().id);
+        putErr(st->kind, sizeof st->kind, e->core->kind());
+    }
+    st->dev_ms = e->devMs.load();
+    st->lcd_writes = e->lcdWrites.load();
+    st->snapshots = e->snapshots.load();
+    st->events_applied = e->applied.load();
+    st->events_dropped = e->dropped.load();
+    st->keys_pressed = e->keysPressed.load();
+    st->key_vel_last = e->lastVel.load();
+    st->key_lean_last = e->lastLean.load();
+    st->midi_out = e->midiOut.load();
+    st->midi_in = e->midiInCount.load();
+    st->midi_notes = e->midiNotes.load();
+    st->midi_in_dropped = e->midiInDropped.load();
+    st->shed = e->shed.load();
+    st->cpu_pct = e->cpuPct.load();
+    st->have_stats = e->haveStats.load();
+    st->renders = e->renders.load();
+    st->render_frames = e->renderFrames.load();
+    st->render_last_us = e->renderLastUs.load();
+    st->render_max_us = e->renderMaxUs.load();
+    st->render_last_frames = e->renderLastFrames.load();
+    st->render_avg_us = st->renders ? (uint32_t)((double)e->renderTicks.load() * e->usPerTick / (double)st->renders) : 0;
+    st->rate = e->rate.load();
+    st->flash_size = e->dev ? e->dev->flash_size() : 0;
+    st->flash_dirty = e->flashDirty.load();
+    st->flash_copies = e->flashCopies.load();
+    st->latency_frames = e->latency.load();
+    st->ring_target = e->target.load();
+    st->ring_fill_min = e->fillMin.load();
+    st->underruns = e->underruns.load();
+    st->underrun_frames = e->underrunFrames.load();
+    st->core_wakes = e->coreWakes.load();
+    st->core_frames = e->coreFrames.load();
+    const double ticks = (double)e->coreTicks.load();
+    st->core_avg_us = st->core_wakes ? (uint32_t)(ticks * e->usPerTick / (double)st->core_wakes) : 0;
+    st->core_max_us = (uint32_t)((double)e->coreMaxTicks.load() * e->usPerTick);
+    st->core_load_pct = st->core_frames && st->rate > 0
+        ? (uint32_t)(ticks * e->usPerTick / ((double)st->core_frames * 1e6 / st->rate) * 100.0 + 0.5) : 0;
+    st->frame_max_us = (uint32_t)((double)e->frameMaxTicks.load() * e->usPerTick);
+    st->realtime = e->rtOk.load();
+    st->midi_mapped = e->midiMapped.load();
+    st->midi_learned = e->midiLearned.load();
+    st->midi_to_core = e->midiToCore.load();
+}
+
+void rfme_reset_render_stats(rfme_t *e)
+{
+    e->renders.store(0);
+    e->renderFrames.store(0);
+    e->renderTicks.store(0);
+    e->renderMaxUs.store(0);
+    e->underruns.store(0);
+    e->underrunFrames.store(0);
+    e->fillReset.store(true);
+    e->coreReset.store(true);                           // (the clock's thread zeroes its own)
+    e->coreTicks.store(0);
+    e->coreWakes.store(0);
+    e->coreFrames.store(0);
+    e->coreMaxTicks.store(0);
+    e->frameMaxTicks.store(0);
+}
+
+int rfme_test_core_threads(void) { return gCoreThreads.load(); }
+
+int rfme_test_realtime(double period_s) { return rfm::setRealtime(period_s) ? 1 : 0; }
+
+uint32_t rfme_preview(rfme_t *e, uint32_t have, uint8_t *rgba)
+{
+    if (const Preview *p = e->preview.take())
+        e->viewSeq = p->seq;
+    if (!e->viewSeq || e->viewSeq == have || !rgba)
+        return e->viewSeq;
+    rfm::lcdToRGBA(e->preview.front()->lcd, rgba, FM1P_LCD_W * FM1P_LCD_H);
+    return e->viewSeq;
+}
+
+uint32_t rfme_button_names_gen(rfme_t *e) { return e->namesGen.load(); }
+
+uint32_t rfme_button_names(rfme_t *e, rfme_button_names_t *out)
+{
+    std::memset(out, 0, sizeof *out);
+    std::lock_guard<std::mutex> g(e->coreLock);         // (guards `core` against an unload)
+    out->gen = e->namesGen.load();
+    out->use = e->namesUse.load();
+    out->loaded = e->core != nullptr;
+    if (e->core)
+        for (int i = 0; i < FM1P_NB; i++)
+            std::snprintf(out->names[i], sizeof out->names[i], "%s", e->core->info().button_names[(size_t)i].c_str());
+    return out->gen;
+}
+
+void rfme_set_button_names(rfme_t *e, int use)
+{
+    if (e->namesUse.exchange(use ? 1 : 0) != (use ? 1 : 0))
+        e->namesGen.fetch_add(1);
+}
+
+uint32_t rfme_panel(rfme_t *e, rfme_panel_t *out)
+{
+    if (const rfme_panel_t *p = e->panelOut.take())
+        e->panelSeen = p->seq;
+    if (out) {
+        if (e->panelSeen)
+            *out = *e->panelOut.front();
+        else {
+            std::memset(out, 0, sizeof *out);
+            out->master_pot = -1;
+        }
+        if (!e->booted)                                 // (unloaded since: nothing is lit)
+            out->booted = 0;
+    }
+    return e->panelSeen;
+}
+
+uint32_t rfme_lcd_hash(rfme_t *e)
+{
+    if (!e->dev || !e->booted)
+        return 0;
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(e->dev->lcd());
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < sizeof(fm1panel_t::lcd); i++)
+        h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
+uint32_t rfme_flash_size(rfme_t *e) { return e->dev ? e->dev->flash_size() : 0; }
+
+int rfme_take_flash(rfme_t *e, uint8_t *out, uint32_t n)
+{
+    if (!e->flashReady.load(std::memory_order_acquire))
+        return 0;
+    const int ok = out && n >= e->flashCopy.size();
+    if (ok)
+        std::memcpy(out, e->flashCopy.data(), e->flashCopy.size());
+    e->flashReady.store(false, std::memory_order_release);
+    return ok;
+}
+
+void rfme_request_flash(rfme_t *e) { e->flashReq.store(true, std::memory_order_release); }
+
+int rfme_final_flash(rfme_t *e, uint8_t *out, uint32_t n)
+{
+    const int prev = e->stop();
+    int ok = 0;
+    if (e->booted && e->dev->flash() && out && n >= e->dev->flash_size()) {
+        e->dev->flash_sync();
+        std::memcpy(out, e->dev->flash(), e->dev->flash_size());
+        e->savedDirty = e->dev->flash_dirty();
+        ok = 1;
+    }
+    e->resume(prev, false);
+    return ok;
+}
+
+// the parameter named `name` of the booted core, -1 none
+static int param(rfme_t *e, const char *name)
+{
+    return e->booted && name ? e->core->param_find(name) : -1;
+}
+
+int rfme_param_get(rfme_t *e, const char *name, int32_t *value)
+{
+    const int i = param(e, name);
+    return i >= 0 && e->core->param_get((uint32_t)i, value) ? 1 : 0;
+}
+
+int rfme_param_set(rfme_t *e, const char *name, int32_t value)
+{
+    const int i = param(e, name);
+    return i >= 0 && e->core->param_set((uint32_t)i, value) ? 1 : 0;
+}
+
+int rfme_param_read(rfme_t *e, const char *name, int32_t *value)
+{
+    const int prev = e->stop();
+    const int ok = rfme_param_get(e, name, value);
+    e->resume(prev, false);
+    return ok;
+}
+
+int rfme_param_persist(rfme_t *e, char *name, uint32_t n, int32_t *min, int32_t *max, int32_t *value)
+{
+    if (!e->booted)
+        return 0;
+    rfm::CoreBackend &c = *e->core;
+    for (uint32_t i = 0; i < c.param_count(); i++) {
+        const rfm::CoreParam *p = c.param(i);
+        if (p && (p->flags & FM1P_PERSIST) && !(p->flags & FM1P_META) && p->readable && p->writable && !p->name.empty()) {
+            putErr(name, n, p->name);
+            if (min)
+                *min = p->min;
+            if (max)
+                *max = p->max;
+            if (value)
+                c.param_get(i, value);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void rfme_test_frame_stall(rfme_t *e, uint32_t us) { e->stallUs = us; }
+
+} // extern "C"
