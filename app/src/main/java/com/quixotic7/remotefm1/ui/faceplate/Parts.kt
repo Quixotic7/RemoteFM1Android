@@ -64,6 +64,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import com.quixotic7.remotefm1.midi.MidiTarget
 import com.quixotic7.remotefm1.ui.theme.Palette
 import com.quixotic7.remotefm1.ui.theme.RfmFonts
 import com.quixotic7.remotefm1.ui.theme.Theme
@@ -192,7 +193,7 @@ fun KnobView(knob: PanelKnob, size: Float, theme: Theme, feed: PanelFeed, modifi
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     down.consume()
-                    if (feed.learnActive) { feed.onLearnPick?.invoke(knob.label); return@awaitEachGesture }
+                    if (feed.learnActive) { feed.learn.pick(MidiTarget.knob(knob).id); return@awaitEachGesture }
                     val start = feed.knobs.master
                     var axis = 0
                     var sent = 0
@@ -244,6 +245,15 @@ fun KnobView(knob: PanelKnob, size: Float, theme: Theme, feed: PanelFeed, modifi
 
 @Composable
 fun KnobBody(knob: PanelKnob, size: Float, theme: Theme, feed: PanelFeed) {
+    Box(Modifier.size(size.dp)) {
+        KnobFace(knob, size, theme, feed)
+        LearnRing(MidiTarget.knob(knob).id, size, theme, feed.learn)
+        if (knob == PanelKnob.MASTER) PotMark(size, theme, feed.pickup)
+    }
+}
+
+@Composable
+private fun KnobFace(knob: PanelKnob, size: Float, theme: Theme, feed: PanelFeed) {
     Canvas(Modifier.size(size.dp)) {
         val px = this.size.width
         val u = px / 100
@@ -279,7 +289,7 @@ fun PanelButton(label: PanelLabel, theme: Theme, feed: PanelFeed, w: Float, h: F
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     down.consume()
-                    if (feed.learnActive) { feed.onLearnPick?.invoke(label.legend); return@awaitEachGesture }
+                    if (feed.learnActive) { feed.learn.pick(MidiTarget.button(label).id); return@awaitEachGesture }
                     if (!feed.holds(label)) feed.button(label, true)
                     while (true) {
                         val ev = awaitPointerEvent(PointerEventPass.Main)
@@ -301,6 +311,7 @@ fun PanelButton(label: PanelLabel, theme: Theme, feed: PanelFeed, w: Float, h: F
                     radius * density, drop * density, if (down) density else 0f)
         }
         ButtonLegend(label, theme, feed, ic, font)
+        LearnOutline(MidiTarget.button(label).id, radius, theme, feed.learn)
     }
 }
 

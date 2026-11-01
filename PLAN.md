@@ -29,6 +29,14 @@ USB MIDI; no USB audio).
 
 A3 built on the headless emulator (2026-11-01): the faceplate in Compose (ui/: Full for phone portrait, phone landscape, tablet landscape and portrait; Controls; Screen; the themes, the editor, the four fonts; display alone; the screen protector; the firmware's button names; the pull-down sheet with iOS's pages and wording), the engine polled every frame with no allocations (RfmEngine.panel / previewDirect); A4's firmware/, A5's data/ and A7's install/ + cart/ wired to the sheet's pages (AppModel: catalog keys, .rfm1 loads, the data steps, the FM-1 lent to an install or a send). The app now starts in Core mode with the sound on (the test pattern is in Diagnostics, as on iOS). scripts/emu_shots.sh takes the iOS sim_shots set on the emulator (phone sizes by `wm size`).
 
+A6 built on the headless emulator (2026-11-01, iOS edf2039): MIDI input from controllers (MidiManager; never the
+FM-1, never the OMX-27 in remote mode), Keys from MIDI, Transpose, "...and reach the firmware's MIDI in", MIDI learn on
+the faceplate (iOS's `midi-map.json` in the app's files, run by the engine), the OMX-27 in REMOTE mode, Velocity &
+pressure from my FM-1, the firmwares' web editors (Firmware › Open its editor: remotefm1.com's managers in a WebView with
+iOS's Web MIDI injected). A3's leftovers: the wiped-memory card, the States mirror synced (launch, changes, the
+foreground), the Bluetooth page from the FM-1 card. Tested with virtual devices (the debug build's keyboard and OMX-27)
+and ChoralRoot's manager from the live site; its "done when" on hardware waits for a real keyboard, OMX-27 and FM-1.
+
 Owner's answers (2026-11-01): install the Android tooling (yes); test device: the owner's Samsung Galaxy Tab A9+
 (SM-X210, Android 16 / API 36, arm64, 1200x1920; adb serial R95Y906QALT; Samsung's Auto Blocker must be off for adb and
 sideloading); copy RFMCore from RemoteFM1IOS (yes); app id `com.quixotic7.remotefm1`, name "RemoteFM1"; a local

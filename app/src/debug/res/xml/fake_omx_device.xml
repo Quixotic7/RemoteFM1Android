@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- (debug builds) A6's fake OMX-27, FakeOmxService: one port each way, named as the OMX-27 names its USB port -->
+<devices>
+    <device manufacturer="RemoteFM1" product="Fake OMX-27" name="OMX-27">
+        <input-port name="in" />
+        <output-port name="out" />
+    </device>
+</devices>

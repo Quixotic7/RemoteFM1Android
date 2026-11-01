@@ -97,6 +97,13 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     val audio = AudioControl(engine.streams, log = { Log.i(TAG, it) },
                              onNotice = { what, out -> main.post { audioNotice(what, out) } },
                              onState = { st -> main.post { audioState = st } })
+    /** (A6) the MIDI side: the faceplate's feed, the learned map, the settings, controllers, learn, the OMX-27 */
+    val midi = AppMidi(ctx, engine, link, prefs)
+    /** (A5's wiped-memory card) the copy from before a version change the new version seems to have erased */
+    var wipedCopy by mutableStateOf<FlashHistory.Snapshot?>(null)
+        private set
+    private val mirrorThread = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "RFMMirror") }
+    private val mirrorQueued = java.util.concurrent.atomic.AtomicBoolean(false)
 
     // ---- what the UI shows (Compose state, written on the main thread)
     var source by mutableStateOf(Source.FM1)
@@ -184,7 +191,9 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         })
         fw.checkAtLaunch()
         flash.onWritten = { k, d -> safety.written(k, d) }
-        DataChanges.add { main.post { dataGen++ } }
+        DataChanges.add { main.post { dataGen++; wipedCopy = safety.wipedCopy } }
+        DataChanges.add { mirrorSync() }
+        mirrorSync()
         val r = fw.resolveSelection(options.core, CoreRef.fromJson(prefs.getString(KEY_CORE_REF, null)), prefs.getString(KEY_CORE, null))
         selected = r?.key ?: pick(options.core, cores.map { it.getString("id") }) ?: "choralroot"
         fallbackNote = r?.note ?: ""
@@ -192,7 +201,6 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         outputList = outputs.list
         outputPick = prefs.getString(KEY_OUTPUT, AudioRoute.AUTO)?.takeIf { it != AudioRoute.USB } ?: AudioRoute.AUTO
         usbAudio = prefs.getBoolean(KEY_USB_AUDIO, false)
-        engine.setMidi()
         enableVirtual(options.virtual)                      // (listed to other apps only when asked for)
         RfmMidi.start(ctx, link.let { if (options.virtual) Fm1Candidate.VIRTUAL_NAME else "" })
         RfmMidi.addListener { main.post { if (!linkPaused) link.rescan(); refreshMidi() } }
@@ -352,6 +360,13 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         message = safety.resetMessage(key)
     }
 
+    /** a safety copy of the running firmware's memory, saved first (a web manager opened: "before manager write") */
+    fun safetyCopyNow(reason: FlashHistory.Reason) {
+        val key = selected
+        val copy = { kotlin.concurrent.thread(name = "RFMSafety") { runCatching { safety.safetyCopy(key, reason) } } }
+        if (booted == key) flash.saveNow(main, clockRunning) { flash.flush(); copy() } else copy()
+    }
+
     /** (Back up everything) the running core's memory saved now; then [done] on the main thread */
     fun saveForBackup(done: () -> Unit) {
         if (booted == null) return done()
@@ -482,6 +497,27 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
             linkPaused = false
             if (restart && source == Source.FM1) link.start()
             link.rescan()
+        }
+    }
+
+    /** (A5) the wiped-memory card answered: the copy put back (Restore it), or the new memory kept */
+    fun answerWiped(restore: Boolean) {
+        val c = safety.answerWiped(restore)
+        wipedCopy = safety.wipedCopy
+        if (c != null) restoreCopy(c)
+    }
+
+    // (A5) the States mirror (the folder the user picked): synced off the main thread at launch, on a library change
+    // and back in the foreground; changes that come while it runs make one more run
+
+    fun mirrorSync() {
+        if (!mirrorQueued.compareAndSet(false, true)) return
+        mirrorThread.execute {
+            mirrorQueued.set(false)
+            runCatching { com.quixotic7.remotefm1.data.DataFolder.mirror(ctx, stateLib)?.sync() }
+                .onSuccess { r -> if (r != null && (r.written + r.imported + r.removed + r.moved > 0 || r.failed.isNotEmpty()))
+                    Log.i(TAG, "mirror: ${r.written} written, ${r.imported} imported, ${r.moved} moved, ${r.removed} removed, failed ${r.failed}") }
+                .onFailure { Log.w(TAG, "mirror: $it") }
         }
     }
 
@@ -646,6 +682,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
 
     /** The app quits (the notification's Stop): SESSION 0, everything closed. */
     fun shutdown() {
+        midi.willClose()
         soundOn = false
         pushAudio()                                             // (closed on the audio thread)
         engine.setClock(RfmEngine.CLOCK_NONE)

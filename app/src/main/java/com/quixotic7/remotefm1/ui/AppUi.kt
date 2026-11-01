@@ -15,7 +15,6 @@ import com.quixotic7.remotefm1.AppModel
 import com.quixotic7.remotefm1.LinkState
 import com.quixotic7.remotefm1.Mode
 import com.quixotic7.remotefm1.Source
-import com.quixotic7.remotefm1.ui.faceplate.EnginePanel
 import com.quixotic7.remotefm1.ui.faceplate.FaceplateUi
 import com.quixotic7.remotefm1.ui.faceplate.PanelChip
 import com.quixotic7.remotefm1.ui.faceplate.PanelFeed
@@ -43,6 +42,12 @@ data class UiLaunch(
     val installDemo: String? = null,    // (A7) check | writing | finished | cutoff: the install page runs by itself (simulated)
     val cartDemo: Boolean = false,      // (A7) made-up banks on a simulated FM-1
     val fm1Prompt: String? = null,      // (A7) install | unanswered | bluetooth | update: the prompt forced
+    val learn: Boolean = false,         // (A6) MIDI learn on (KN1 picked when learnPick is not given)
+    val learnPick: String? = null,      // (A6) the control picked in learn mode (a MIDI target id)
+    val demoMap: Boolean = false,       // (A6) a few mappings, as if learned (screenshots)
+    val sheetScroll: String? = null,    // (A6) the MIDI & audio page scrolled to: knobs | omx
+    val openManager: Boolean = false,   // (A6) the running firmware's web editor open
+    val modeSource: String? = null,     // (A6) the mode page's mapping (a source id)
 ) {
     companion object {
         fun from(b: Bundle?): UiLaunch {
@@ -55,6 +60,8 @@ data class UiLaunch(
                 protector = s("protector")?.let { it == "on" || it == "true" || it == "1" },
                 peel = s("peel")?.toFloatOrNull(), displayAlone = flag("displayalone"), steps = flag("steps"), page = s("page"),
                 installDemo = s("installdemo"), cartDemo = flag("cartdemo"), fm1Prompt = s("fm1prompt"),
+                learn = flag("learn"), learnPick = s("learnpick"), demoMap = flag("demomap"), sheetScroll = s("sheetscroll"),
+                openManager = flag("openmanager"), modeSource = s("modesource"),
             )
         }
     }
@@ -63,18 +70,22 @@ data class UiLaunch(
 /** the sheet's pages (null: its main page, "Controls") */
 enum class SheetPageId(val raw: String) {
     FIRMWARE("firmware"), ABOUT("about"), STATES("states"), SAFETY("safetycopies"), GET_FIRMWARE("getfirmware"),
-    MIDI("midi"), AUDIO_OUTPUT("audiooutput"), SETTINGS("settings"), INSTALL("install"), CART("cart");
+    MIDI("midi"), AUDIO_OUTPUT("audiooutput"), SETTINGS("settings"), INSTALL("install"), CART("cart"),
+    MIDI_INPUT("midiinput"), KEY_CHANNEL("keychannel"), MIDI_MODE("midimode");
 
     companion object { fun of(s: String?) = entries.firstOrNull { it.raw == s } }
 }
 
 /** a page over everything (iOS's full-screen covers) */
-enum class Overlay { DIAGNOSTICS, BLUETOOTH }
+enum class Overlay { DIAGNOSTICS, BLUETOOTH, MANAGER }
 
-class AppUi(ctx: Context, val model: AppModel, launch: UiLaunch) {
+class AppUi(ctx: Context, val model: AppModel, val launch: UiLaunch) {
     private val prefs = ctx.getSharedPreferences("rfm1", Context.MODE_PRIVATE)
     val ui = FaceplateUi()
-    val feed = PanelFeed(EnginePanel(model.engine))
+    /** (A6: process-wide, in AppMidi, so the OMX-27 and MIDI learn keep it across a rotation) */
+    val feed: PanelFeed = model.midi.feed
+    /** (A6) the MIDI mode page's mapping (its source id) */
+    var modeSource by mutableStateOf<String?>(launch.modeSource)
     val themes = ThemeStore(prefs, ThemeStore.tokens(ctx), launch.theme)
     val protector = ScreenProtector(prefs)
     var page by mutableStateOf<SheetPageId?>(null)
@@ -115,6 +126,12 @@ class AppUi(ctx: Context, val model: AppModel, launch: UiLaunch) {
         if (launch.sheet || page != null) ui.sheetOpen = true
         if (launch.themeEditor) ui.editorOpen = true
         if (launch.displayAlone) ui.displayAlone = true
+        if (launch.demoMap) model.midi.demoMap()
+        if (launch.learn) {
+            model.midi.startLearn(ui)
+            model.midi.learn.pick(launch.learnPick ?: "KN1")
+        }
+        if (launch.openManager) overlay = Overlay.MANAGER
         when (launch.page) {
             "diagnostics" -> overlay = Overlay.DIAGNOSTICS
             "bluetooth" -> overlay = Overlay.BLUETOOTH

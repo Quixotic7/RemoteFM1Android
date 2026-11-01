@@ -419,6 +419,11 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStatus(JN
     j.num("key_lean_last", s.key_lean_last);
     j.num("midi_out", s.midi_out);
     j.num("midi_to_core", s.midi_to_core);
+    j.num("midi_in", s.midi_in);
+    j.num("midi_notes", s.midi_notes);
+    j.num("midi_in_dropped", s.midi_in_dropped);
+    j.num("midi_mapped", s.midi_mapped);
+    j.num("midi_learned", s.midi_learned);
     j.num("snapshots", s.snapshots);
     j.num("renders", (double)s.renders);
     j.num("render_frames", (double)s.render_frames);
@@ -705,4 +710,76 @@ JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetButtonNam
     rfme_set_button_names(host(p)->e, use ? 1 : 0);
 }
 
+// ---- A6: MIDI from controllers, the learned map, learn, a web manager's SysEx and the core's MIDI out
+
+// one channel message (1..3 bytes) as host MIDI (to_firmware 0: learn, the map, the keys, the rest to midi_in) or
+// straight to the firmware's midi_in (1); any thread but the audio callback. 1: queued
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeMidiIn(JNIEnv *env, jclass, jlong p, jbyteArray data,
+                                                                           jint off, jint len, jboolean toFirmware)
+{
+    if (!data || len <= 0 || len > 3 || off < 0 || off + len > env->GetArrayLength(data))
+        return 0;
+    jbyte b[3];
+    env->GetByteArrayRegion(data, off, len, b);
+    return rfme_midi_in(host(p)->e, reinterpret_cast<const uint8_t *>(b), (uint32_t)len, toFirmware ? 1 : 0);
+}
+
+// one whole SysEx (F0 .. F7) to the core's midi_in; 1 queued, 0 not one SysEx or no room now
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSysexIn(JNIEnv *env, jclass, jlong p, jbyteArray data)
+{
+    if (!data)
+        return 0;
+    std::vector<uint8_t> v((size_t)env->GetArrayLength(data));
+    env->GetByteArrayRegion(data, 0, (jsize)v.size(), reinterpret_cast<jbyte *>(v.data()));
+    return rfme_sysex_in(host(p)->e, v.data(), (uint32_t)v.size());
+}
+
+// the learned map: 5 ints per entry (src, channel, number, target, mode), n entries, the knob speed
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetMidiMap(JNIEnv *env, jclass, jlong p,
+                                                                               jintArray entries, jint n, jfloat speed)
+{
+    std::vector<rfme_map_entry_t> m;
+    if (entries && n > 0) {
+        const jsize len = env->GetArrayLength(entries);
+        std::vector<jint> v((size_t)len);
+        env->GetIntArrayRegion(entries, 0, len, v.data());
+        for (jint i = 0; i < n && 5 * i + 4 < len; i++)
+            m.push_back(rfme_map_entry_t{(uint8_t)v[5 * i], (uint8_t)v[5 * i + 1], (uint8_t)v[5 * i + 2],
+                                         (uint8_t)v[5 * i + 3], (uint8_t)v[5 * i + 4]});
+    }
+    rfme_set_midi_map(host(p)->e, m.empty() ? nullptr : m.data(), (uint32_t)m.size(), speed);
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeLearn(JNIEnv *, jclass, jlong p, jboolean armed)
+{
+    rfme_learn(host(p)->e, armed ? 1 : 0);
+}
+
+// the next message in the learn queue into msg (3 bytes); false: none
+JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeLearnTake(JNIEnv *env, jclass, jlong p, jbyteArray msg)
+{
+    uint8_t m[3];
+    if (!rfme_learn_take(host(p)->e, m))
+        return JNI_FALSE;
+    if (msg && env->GetArrayLength(msg) >= 3)
+        env->SetByteArrayRegion(msg, 0, 3, reinterpret_cast<const jbyte *>(m));
+    return JNI_TRUE;
+}
+
+// the core's MIDI out packets (USB-MIDI) into out, at most its length; how many
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeMidiOutTake(JNIEnv *env, jclass, jlong p, jintArray out)
+{
+    if (!out)
+        return 0;
+    const jsize cap = env->GetArrayLength(out);
+    std::vector<jint> v;
+    uint32_t pkt = 0;
+    while ((jsize)v.size() < cap && rfme_midi_out_take(host(p)->e, &pkt))
+        v.push_back((jint)pkt);
+    if (!v.empty())
+        env->SetIntArrayRegion(out, 0, (jsize)v.size(), v.data());
+    return (jint)v.size();
+}
+
 } // extern "C"
+

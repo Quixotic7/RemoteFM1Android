@@ -81,7 +81,11 @@ class WiringTest {
         rule.runOnUiThread { data.loadState(s) }
         assertTrue("loaded: ${m.message}", m.message.startsWith("Loaded \"$name\""))
         assertTrue(until(10_000) { m.engineStatus.optInt("booted") != 0 })
-        assertTrue("a safety copy before the load", until(5_000) { data.safetyCopies.firstOrNull()?.reason == "before load state" })
+        assertTrue("a safety copy before the load: ${data.safetyCopies.take(4).map { it.reason + " " + it.date }}", until(5_000) {
+            // (FlashHistory keeps one copy of the same memory: when the newest is already an event copy of it, e.g.
+            // A6's "before manager write", that one stands for the load's)
+            data.safetyCopies.firstOrNull()?.reason.let { it == "before load state" || it == "before manager write" }
+        })
         rule.runOnUiThread { data.deleteState(s) }
         assertTrue(until(5_000) { data.states.none { it.name == name } })
     }

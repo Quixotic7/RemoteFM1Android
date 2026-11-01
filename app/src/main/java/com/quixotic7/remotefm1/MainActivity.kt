@@ -78,6 +78,12 @@ class MainActivity : ComponentActivity() {
         setContent { MainScreen(appUi) { askNotifications() } }
     }
 
+    // (A5) back in the foreground: the States mirror synced (off the main thread)
+    override fun onStart() {
+        super.onStart()
+        model.mirrorSync()
+    }
+
     // the app goes to the background: the flash saved (iOS's didEnterBackground); the sound and link go on
     override fun onStop() {
         super.onStop()

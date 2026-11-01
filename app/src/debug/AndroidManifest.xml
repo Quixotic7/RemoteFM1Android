@@ -15,5 +15,30 @@
                 android:name="android.media.midi.MidiDeviceService"
                 android:resource="@xml/fake_fm1_device" />
         </service>
+        <!-- (A6) the tests' MIDI keyboard and OMX-27, disabled until a test enables them -->
+        <service
+            android:name=".FakeControllerService"
+            android:enabled="false"
+            android:exported="true"
+            android:permission="android.permission.BIND_MIDI_DEVICE_SERVICE">
+            <intent-filter>
+                <action android:name="android.media.midi.MidiDeviceService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.media.midi.MidiDeviceService"
+                android:resource="@xml/fake_controller_device" />
+        </service>
+        <service
+            android:name=".FakeOmxService"
+            android:enabled="false"
+            android:exported="true"
+            android:permission="android.permission.BIND_MIDI_DEVICE_SERVICE">
+            <intent-filter>
+                <action android:name="android.media.midi.MidiDeviceService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.media.midi.MidiDeviceService"
+                android:resource="@xml/fake_omx_device" />
+        </service>
     </application>
 </manifest>

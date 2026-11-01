@@ -61,6 +61,12 @@ class ButtonNames(firmware: List<String?>?, use: Boolean = true) {
     fun isRenamed(l: PanelLabel) = renamed[l.ordinal]
     val anyRenamed get() = renamed.contains(true)
 
+    /** (A6) a MIDI target's name in learn's words: a renamed button "PERF (ARP)", else the id */
+    fun title(target: String): String {
+        val l = com.quixotic7.remotefm1.midi.MidiTarget.named(target)?.button ?: return target
+        return if (isRenamed(l)) "${label(l)} ($target)" else target
+    }
+
     override fun equals(other: Any?) = other is ButtonNames && other.labels == labels && other.renamed == renamed
     override fun hashCode() = labels.hashCode() * 31 + renamed.hashCode()
 

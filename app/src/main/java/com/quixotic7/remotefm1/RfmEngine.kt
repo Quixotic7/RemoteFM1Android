@@ -180,6 +180,27 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
     /** The "Firmware's button names" setting (rfme_set_button_names). */
     fun setButtonNames(use: Boolean) = nativeSetButtonNames(handle, use)
 
+    // ---- A6: MIDI (controllers, learn, the learned map, a web manager)
+    /** One channel message ([len] 1..3 bytes at [off]) as host MIDI (learn, the map, the keys, the rest to the
+     *  firmware), or with [toFirmware] straight to the firmware's MIDI in. Any thread; true: queued. */
+    fun midiIn(data: ByteArray, off: Int = 0, len: Int = data.size, toFirmware: Boolean = false): Boolean =
+        nativeMidiIn(handle, data, off, len, toFirmware) == 1
+
+    /** One whole SysEx (F0 .. F7) to the firmware's MIDI in; false: not one SysEx, or no room now (try again). */
+    fun sysexIn(data: ByteArray): Boolean = nativeSysexIn(handle, data) == 1
+
+    /** The learned map (5 ints per entry: src, channel 0..15, number, target, mode; MidiMap.entries) and the knob speed. */
+    fun setMidiMap(entries: IntArray, speed: Float) = nativeSetMidiMap(handle, entries, entries.size / 5, speed)
+
+    /** Learn armed: CCs and note-ons go to the learn queue instead of anywhere else. */
+    fun learn(armed: Boolean) = nativeLearn(handle, armed)
+
+    /** The next message learn took into [msg] (3 bytes); false: none. */
+    fun learnTake(msg: ByteArray): Boolean = nativeLearnTake(handle, msg)
+
+    /** The core's MIDI out packets (USB-MIDI) into [out]; how many (one reader at a time). */
+    fun midiOutTake(out: IntArray): Int = nativeMidiOutTake(handle, out)
+
     override fun close() {
         if (handle != 0L) {
             nativeDestroy(handle)
@@ -260,5 +281,11 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         @JvmStatic private external fun nativeButtonNamesGen(h: Long): Int
         @JvmStatic private external fun nativeButtonNames(h: Long): String
         @JvmStatic private external fun nativeSetButtonNames(h: Long, use: Boolean)
+        @JvmStatic private external fun nativeMidiIn(h: Long, data: ByteArray, off: Int, len: Int, toFirmware: Boolean): Int
+        @JvmStatic private external fun nativeSysexIn(h: Long, data: ByteArray): Int
+        @JvmStatic private external fun nativeSetMidiMap(h: Long, entries: IntArray, n: Int, speed: Float)
+        @JvmStatic private external fun nativeLearn(h: Long, armed: Boolean)
+        @JvmStatic private external fun nativeLearnTake(h: Long, msg: ByteArray): Boolean
+        @JvmStatic private external fun nativeMidiOutTake(h: Long, out: IntArray): Int
     }
 }

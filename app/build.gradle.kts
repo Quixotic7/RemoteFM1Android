@@ -73,6 +73,8 @@ dependencies {
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.material3)
     implementation(libs.oboe)
+    // (A6) the firmwares' web managers: WebView's document-start script
+    implementation("androidx.webkit:webkit:1.14.0")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.junit)

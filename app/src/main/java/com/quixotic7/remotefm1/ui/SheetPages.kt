@@ -49,6 +49,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -101,6 +103,9 @@ fun SheetContent(a: AppUi) {
                     ?: LaterPage("Get firmware", "Firmware", "The list of firmware to download comes with the firmware milestone (A4).") { a.page = SheetPageId.FIRMWARE }
                 SheetPageId.MIDI -> MidiAudioPage(a)
                 SheetPageId.AUDIO_OUTPUT -> AudioOutputPage(a)
+                SheetPageId.MIDI_INPUT -> MidiInputPage(a)
+                SheetPageId.KEY_CHANNEL -> KeyChannelPage(a)
+                SheetPageId.MIDI_MODE -> MidiModePage(a)
                 SheetPageId.SETTINGS -> SettingsPage(a)
                 SheetPageId.INSTALL -> a.fm1.installPage?.invoke { a.page = SheetPageId.SETTINGS }
                     ?: LaterPage("Install RemoteFM1", "Settings", "Installing RemoteFM1 on the FM-1 comes with milestone A7.") { a.page = SheetPageId.SETTINGS }
@@ -135,9 +140,10 @@ private fun MainSheet(a: AppUi) {
                 SourceCard("FM-1", fm1Line(a), m.source == Source.FM1,
                            if (a.chip == PanelChip.IN_USE) Palette.sheetAccent else Palette.linkedDot, "source-fm1") { a.pick(Source.FM1) }
             }
-            if (m.source == Source.FM1 && a.chip != PanelChip.LINKED) {
+            // (the FM-1 card's actions: the Bluetooth pairing, as on iOS)
+            if (m.source == Source.FM1) {
                 Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SheetButton("Bluetooth…") { a.overlay = Overlay.BLUETOOTH }
+                    SheetButton("Bluetooth…", tag = "button-bluetooth") { a.overlay = Overlay.BLUETOOTH }
                 }
             }
             SheetSectionTitle("View · or swipe sideways")
@@ -207,7 +213,10 @@ private fun FirmwarePage(a: AppUi) {
         }
         SheetSectionTitle("This firmware", top = 12)
         SheetList {
-            // TODO(wire) A6: "Open its editor" (the firmware's web manager) when the catalog has one
+            // (A6) the firmware's own web editor, when the site hosts one for it
+            if (c != null && com.quixotic7.remotefm1.managers.ManagerList.url(c.firmwareId) != null) {
+                SheetRow("Open its editor", value = "presets, backups", tag = "row-editor") { a.overlay = Overlay.MANAGER }
+            }
             SheetRow("About this firmware", enabled = c != null, tag = "row-about") { a.page = SheetPageId.ABOUT }
             SheetRow("Restart the firmware", divider = false, chevron = false, tag = "row-restart") { m.restartFirmware() }
         }
@@ -472,7 +481,17 @@ private fun SafetyPage(a: AppUi) {
 @Composable
 private fun MidiAudioPage(a: AppUi) {
     val m = a.model
-    SheetPage("MIDI & audio", back = { a.page = null }) {
+    val midi = m.midi
+    val ms = midi.settings
+    val scroll = rememberScrollState()
+    var knobsAt by remember { mutableStateOf(-1) }
+    var omxAt by remember { mutableStateOf(-1) }
+    // (screenshots: -sheetscroll knobs | omx)
+    LaunchedEffect(knobsAt, omxAt) {
+        val to = when (a.launch.sheetScroll) { "knobs" -> knobsAt; "omx" -> omxAt; else -> -1 }
+        if (to >= 0) scroll.scrollTo(to)
+    }
+    SheetPage("MIDI & audio", back = { a.page = null }, scroll = scroll) {
         SheetSectionTitle("Audio", top = 12)
         SheetList {
             SheetToggle("Sound", m.soundOn, tag = "toggle-sound") { m.setSound(it) }
@@ -492,16 +511,55 @@ private fun MidiAudioPage(a: AppUi) {
         }
         SheetNote(AudioRoute.USB_WARNING, if (m.usbAudio) Palette.orange else Palette.sheetMuted)
         SheetSectionTitle("MIDI")
-        // TODO(wire) A6: MIDI input, Keys from MIDI, Transpose, Velocity & pressure, Knobs from MIDI, the OMX-27
         SheetList {
-            SheetRow("MIDI input", value = "None", enabled = false) {}
-            SheetRow("Keys from MIDI", value = "Any channel", enabled = false) {}
-            SheetStepper("Transpose", 0, 0..0, text = { if (it == 0) "0" else "$it oct" }) {}
+            SheetRow("MIDI input", value = midiInputValue(midi.input), tag = "row-midiinput") { a.page = SheetPageId.MIDI_INPUT }
+            KeyChannelRows(ms.keyChannel, ms.keyNotesToFirmware, { midi.update(ms.copy(keyNotesToFirmware = it)) }) {
+                a.page = SheetPageId.KEY_CHANNEL
+            }
+            SheetStepper("Transpose", ms.transpose, -2..2, text = { if (it == 0) "0" else "${if (it > 0) "+" else "−"}${kotlin.math.abs(it)} oct" }) {
+                midi.update(ms.copy(transpose = it))
+            }
+            SheetToggle("Velocity & pressure from my FM-1", ms.keyTouch, tag = "toggle-keytouch") { midi.update(ms.copy(keyTouch = it)) }
             SheetRow("Bluetooth MIDI devices", tag = "row-bluetooth") { a.overlay = Overlay.BLUETOOTH }
             SheetRow("Look for the FM-1 again", divider = false, chevron = false) { m.link.rescan() }
         }
-        SheetNote("MIDI input, Keys from MIDI, MIDI learn and the OMX-27 come with milestone A6.")
+        SheetNote("Keys from MIDI: notes on that channel (or any) play the keys, transposed by octaves. Notes on other " +
+                  "channels, notes outside the keys, every note when Off, and whatever the learned knobs don't take go to " +
+                  "the firmware's MIDI in. Velocity & pressure: the FM-1's keys play at their own velocity and send their " +
+                  "pressure to the firmware (RemoteFM1 0.3.1 or later; off: velocity 100).")
         SheetNote("FM-1 link: ${m.statusText}")
+        Box(Modifier.onGloballyPositioned { knobsAt = it.positionInParent().y.toInt() }) {
+            Column {
+                MidiMapSection(midi.store, ms.useLearnedMap, { midi.update(ms.copy(useLearnedMap = it)) }, a.feed.names,
+                               pickMode = { a.modeSource = it; a.page = SheetPageId.MIDI_MODE }, learn = { midi.startLearn(a.ui) })
+            }
+        }
+        Box(Modifier.onGloballyPositioned { omxAt = it.positionInParent().y.toInt() }) {
+            Column {
+                SheetSectionTitle("OMX-27")
+                OmxSection(midi.omx)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MidiInputPage(a: AppUi) {
+    SheetPage("MIDI input", "MIDI & audio", back = { a.page = SheetPageId.MIDI }) { MidiInputList(a.model.midi.input) }
+}
+
+@Composable
+private fun KeyChannelPage(a: AppUi) {
+    val midi = a.model.midi
+    SheetPage("Keys from MIDI", "MIDI & audio", back = { a.page = SheetPageId.MIDI }) {
+        KeyChannelList(midi.settings.keyChannel) { midi.update(midi.settings.copy(keyChannel = it)) }
+    }
+}
+
+@Composable
+private fun MidiModePage(a: AppUi) {
+    SheetPage("How it turns", "MIDI & audio", back = { a.page = SheetPageId.MIDI }) {
+        MidiModeList(a.model.midi.store, a.modeSource ?: "")
     }
 }
 

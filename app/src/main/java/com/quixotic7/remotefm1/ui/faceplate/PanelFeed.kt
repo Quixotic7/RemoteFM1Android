@@ -7,7 +7,11 @@
 //   out   the core's LCD (one Bitmap, updated in place), its LEDs, the knobs' turns and MASTER, read from the engine's
 //         lock-free snapshot (rfme_panel, rfme_preview) by poll(), which the faceplate calls every frame
 // What changes is split into small state counters, so an LED changing redraws the keybed or the buttons, not the whole
-// faceplate. Learn mode (A6) and the OMX-27 (A6) hook in later: [onTick], the source of a touch.
+// faceplate.
+// A6 (iOS M8): touches have a source (this screen, the OMX-27): each holds keys and buttons of its own, and
+// releaseAll(source) lets go of that one's only. MIDI learn's state (LearnFeed, run by MidiLearnMode), the faceplate's
+// toast (ToastCenter) and MASTER's pickup mark (PickupFeed: a learned pot or the OMX's K5 away from MASTER) live here
+// too, so every part of the faceplate can read them.
 package com.quixotic7.remotefm1.ui.faceplate
 
 import android.graphics.Bitmap
@@ -33,6 +37,8 @@ interface PanelEngine {
     fun preview(have: Int, buf: ByteBuffer): Int
     val buttonNamesGen: Int
     fun buttonNames(): ButtonNames
+    /** (A6) one channel message to the engine's MIDI in (toFirmware: straight to the firmware's) */
+    fun midiIn(bytes: ByteArray, toFirmware: Boolean) {}
 }
 
 /** the app's engine as the faceplate sees it */
@@ -44,6 +50,7 @@ class EnginePanel(private val e: RfmEngine) : PanelEngine {
     override fun preview(have: Int, buf: ByteBuffer) = e.previewDirect(have, buf)
     override val buttonNamesGen get() = e.buttonNamesGen
     override fun buttonNames(): ButtonNames = PanelFeed.parseNames(e.buttonNamesText())
+    override fun midiIn(bytes: ByteArray, toFirmware: Boolean) { e.midiIn(bytes, toFirmware = toFirmware) }
 }
 
 /** LED brightness (fm1core.h FM1P_LED_*) as the faceplate draws it */
@@ -104,11 +111,14 @@ class PanelFeed(host: PanelEngine?) {
     /** the running firmware's button names, read again when the engine's core or setting changes */
     var names by mutableStateOf(ButtonNames.STANDARD)
         private set
-    /** (A6) MIDI learn: while on, a touch picks a control instead of playing it */
-    var learnActive by mutableStateOf(false)
-    /** (A6) a control picked in learn mode (its MIDI target id) */
-    var onLearnPick: ((String) -> Unit)? = null
-    /** every poll (A6: MIDI learn takes its messages here) */
+    /** (A6) who holds a key or a button: this screen's touches, or the OMX-27 */
+    enum class Source { SCREEN, OMX }
+    /** (A6) MIDI learn's state: while on, a touch picks a control instead of playing it */
+    val learn = LearnFeed()
+    val toast = ToastCenter()
+    val pickup = PickupFeed()
+    val learnActive: Boolean get() = learn.active
+    /** every poll (MIDI learn takes its messages here) */
     var onTick: (() -> Unit)? = null
     /** each new screen frame (A4's thumbnails): the RGBA buffer, valid during the call */
     var onFrame: ((ByteBuffer) -> Unit)? = null
@@ -121,7 +131,12 @@ class PanelFeed(host: PanelEngine?) {
     private var previewSeq = 0
     private var namesGen = -1
     private val keyTouches = IntArray(27)
+    private var omxKeys = 0                                     // the OMX-27's
     private var screenLabels = 0
+    private var omxLabels = 0
+    private var lastPanelPoll = -1L
+    private var masterPot = -1                                  // (rfme_panel's, as last seen)
+    private var pickupSeq: Int? = null
     private val localUntil = LongArray(8)
 
     fun attach(h: PanelEngine?) {
@@ -129,6 +144,7 @@ class PanelFeed(host: PanelEngine?) {
         panelSeq = 0
         previewSeq = 0
         namesGen = -1
+        pickupSeq = null
     }
 
     // ---- in (the same path as the FM-1's events)
@@ -138,42 +154,58 @@ class PanelFeed(host: PanelEngine?) {
         host?.event(type, index, value)
     }
 
-    /** a finger down on note key [k] (several fingers on one key: one press) */
-    fun keyDown(k: Int) {
+    /** a finger (or the OMX-27) down on note key [k] (several fingers on one key: one press) */
+    fun keyDown(k: Int, source: Source = Source.SCREEN) {
         if (k !in 0 until 27) return
-        val was = keyTouches[k] > 0
-        keyTouches[k]++
+        val was = keyHeld(k)
+        when (source) {
+            Source.SCREEN -> keyTouches[k]++
+            Source.OMX -> omxKeys = omxKeys or (1 shl k)
+        }
         if (was) return
         lights.touchedKeys = lights.touchedKeys or (1 shl k)
         lights.changed()
         event(RfmEngine.EV_KEY, k, 1)
     }
 
-    fun keyUp(k: Int) {
-        if (k !in 0 until 27 || keyTouches[k] == 0) return
-        keyTouches[k]--
-        if (keyTouches[k] > 0) return
+    fun keyUp(k: Int, source: Source = Source.SCREEN) {
+        if (k !in 0 until 27) return
+        when (source) {
+            Source.SCREEN -> { if (keyTouches[k] == 0) return; keyTouches[k]-- }
+            Source.OMX -> { if (omxKeys and (1 shl k) == 0) return; omxKeys = omxKeys and (1 shl k).inv() }
+        }
+        if (keyHeld(k)) return
         lights.touchedKeys = lights.touchedKeys and (1 shl k).inv()
         lights.changed()
         event(RfmEngine.EV_KEY, k, 0)
     }
 
-    fun holdsKey(k: Int) = k in 0 until 27 && keyTouches[k] > 0
-    fun holds(l: PanelLabel) = (screenLabels and (1 shl l.ordinal)) != 0
+    private fun keyHeld(k: Int) = keyTouches[k] > 0 || omxKeys and (1 shl k) != 0
 
-    /** a button by its label, through the panel's btn_id (the firmware's own map) */
-    fun button(l: PanelLabel, down: Boolean) {
+    /** held by this source (tests, the views) */
+    fun holdsKey(k: Int, source: Source = Source.SCREEN) =
+        k in 0 until 27 && if (source == Source.SCREEN) keyTouches[k] > 0 else omxKeys and (1 shl k) != 0
+    fun holds(l: PanelLabel, source: Source = Source.SCREEN) =
+        ((if (source == Source.SCREEN) screenLabels else omxLabels) and (1 shl l.ordinal)) != 0
+
+    /** a button by its label, through the panel's btn_id (the firmware's own map); down while any source holds it */
+    fun button(l: PanelLabel, down: Boolean, source: Source = Source.SCREEN) {
         val bit = 1 shl l.ordinal
-        if (((screenLabels and bit) != 0) == down) return
-        screenLabels = if (down) screenLabels or bit else screenLabels and bit.inv()
-        lights.touchedLabels = if (down) lights.touchedLabels or bit else lights.touchedLabels and bit.inv()
+        val mine = if (source == Source.SCREEN) screenLabels else omxLabels
+        if (((mine and bit) != 0) == down) return
+        val was = ((screenLabels or omxLabels) and bit) != 0
+        val now = if (down) mine or bit else mine and bit.inv()
+        if (source == Source.SCREEN) screenLabels = now else omxLabels = now
+        val held = ((screenLabels or omxLabels) and bit) != 0
+        if (held == was) return
+        lights.touchedLabels = if (held) lights.touchedLabels or bit else lights.touchedLabels and bit.inv()
         lights.changed()
         val id = host?.matrixButton(l.ordinal) ?: -1
-        event(RfmEngine.EV_BUTTON, id, if (down) 1 else 0)
+        event(RfmEngine.EV_BUTTON, id, if (held) 1 else 0)
     }
 
     /** detents of an encoder (+ clockwise), by its knob role */
-    fun turn(k: PanelKnob, detents: Int) {
+    fun turn(k: PanelKnob, detents: Int, source: Source = Source.SCREEN) {
         if (k == PanelKnob.MASTER || detents == 0) return
         val id = host?.matrixEncoder(k.ordinal) ?: -1
         var left = detents
@@ -185,24 +217,39 @@ class PanelFeed(host: PanelEngine?) {
         knobs.turns[k.ordinal] += detents                       // (drawn at once; the snapshots confirm it)
         knobs.changed()
         localUntil[k.ordinal] = SystemClock.uptimeMillis() + LOCAL_HOLD_MS
-        onKnobTouched?.invoke(k)
+        if (source == Source.SCREEN) onKnobTouched?.invoke(k)
     }
 
     /** the MASTER pot, absolute 0..1023 */
-    fun master(v: Int) {
+    fun master(v: Int, source: Source = Source.SCREEN) {
         val c = v.coerceIn(0, 1023)
         knobs.master = c
         knobs.masterKnown = true
         knobs.changed()
         localUntil[PanelKnob.MASTER.ordinal] = SystemClock.uptimeMillis() + LOCAL_HOLD_MS
         event(EV_MASTER, 0, c)
-        onKnobTouched?.invoke(PanelKnob.MASTER)
+        if (source == Source.SCREEN) onKnobTouched?.invoke(PanelKnob.MASTER)
     }
 
-    /** everything this screen holds let go (the faceplate went away) */
-    fun releaseAll() {
-        for (k in 0 until 27) if (keyTouches[k] > 0) { keyTouches[k] = 1; keyUp(k) }
-        for (l in PanelLabel.entries) if (holds(l)) button(l, false)
+    /** everything this source holds let go (the screen: the faceplate went away; the OMX-27: it left REMOTE mode) */
+    fun releaseAll(source: Source = Source.SCREEN) {
+        for (k in 0 until 27) if (holdsKey(k, source)) {
+            if (source == Source.SCREEN) keyTouches[k] = 1
+            keyUp(k, source)
+        }
+        for (l in PanelLabel.entries) if (holds(l, source)) button(l, false, source)
+    }
+
+    /** one channel message straight to the firmware's MIDI in (not mapped, no keys: the OMX-27's Keyboard view) */
+    fun midiToFirmware(bytes: ByteArray) {
+        if (bytes.isEmpty()) return
+        host?.midiIn(bytes, true)
+    }
+
+    /** MASTER's pickup mark: a pot (0..1023) waiting to reach MASTER; first: say so (the OMX-27's K5) */
+    fun pickupAt(pot: Int, at: Int, first: Boolean) {
+        pickup.show(pot, SystemClock.uptimeMillis())
+        if (first) toast.show(PickupFeed.text(at), seconds = 3.0)
     }
 
     // ---- out
@@ -211,6 +258,9 @@ class PanelFeed(host: PanelEngine?) {
     fun poll() {
         val h = host ?: return
         pollPanel(h)
+        val now = SystemClock.uptimeMillis()
+        pickup.expire(now)
+        toast.expire(now)
         val g = h.buttonNamesGen
         if (g != namesGen) {
             namesGen = g
@@ -231,15 +281,33 @@ class PanelFeed(host: PanelEngine?) {
     }
 
     private fun pollPanel(h: PanelEngine) {
+        lastPanelPoll = SystemClock.uptimeMillis()
         val seq = h.panel(panelBuf)
         if (seq != panelSeq) {
             panelSeq = seq
             apply(panelBuf)
+        } else if (lights.booted && panelBuf[I_BOOTED] == 0) {
+            apply(panelBuf)
         }
     }
 
-    /** a panel snapshot (RfmEngine.panel's 56 ints) applied (tests call it directly) */
-    fun apply(p: IntArray) {
+    /** the panel state alone (the LEDs, what is held, the knobs), unless it was read in the last [ageMs] (the
+     *  OMX-27 reads the LEDs with no faceplate on screen) */
+    fun pollPanel(ageMs: Long) {
+        val h = host ?: return
+        if (SystemClock.uptimeMillis() - lastPanelPoll >= ageMs) pollPanel(h)
+    }
+
+    /** a panel snapshot (RfmEngine.panel's 56 ints) applied (tests call it directly; [now] in ms) */
+    fun apply(p: IntArray, now: Long = SystemClock.uptimeMillis()) {
+        // a learned MASTER pot waiting: its mark, and a word each time one starts waiting
+        if (p[I_MASTER_POT] != masterPot) {
+            masterPot = p[I_MASTER_POT]
+            if (masterPot >= 0) pickup.show(masterPot, now) else pickup.hide()
+        }
+        val ps = p[I_PICKUP_SEQ]
+        if (pickupSeq != null && pickupSeq != ps && p[I_MASTER_POT] >= 0) toast.show(PickupFeed.text(p[I_MASTER]), seconds = 3.0)
+        pickupSeq = ps
         val booted = p[I_BOOTED] != 0
         var changed = false
         if (booted != lights.booted) { lights.booted = booted; changed = true }
@@ -256,13 +324,13 @@ class PanelFeed(host: PanelEngine?) {
         if (p[I_LABELS] != lights.heldLabels) { lights.heldLabels = p[I_LABELS]; changed = true }
         if (changed) lights.changed()
         if (!booted) return
-        val now = SystemClock.uptimeMillis()
+        val t = SystemClock.uptimeMillis()
         var kc = false
         for (r in 0 until 7) {
-            if (localUntil[r] > now) continue                   // (a turn here not applied yet)
+            if (localUntil[r] > t) continue                   // (a turn here not applied yet)
             if (knobs.turns[r] != p[I_ENC + r]) { knobs.turns[r] = p[I_ENC + r]; kc = true }
         }
-        if (localUntil[PanelKnob.MASTER.ordinal] <= now && (p[I_MASTER] != knobs.master || !knobs.masterKnown)) {
+        if (localUntil[PanelKnob.MASTER.ordinal] <= t && (p[I_MASTER] != knobs.master || !knobs.masterKnown)) {
             knobs.master = p[I_MASTER]
             knobs.masterKnown = true
             kc = true

@@ -242,6 +242,44 @@ opens, stalls and how many streams exist.
   8 s; more ANRs when the sound was toggled). Since then: no stream call on the main thread (the audio-control
   thread), and USB outputs are not offered unless **Settings › Sound through USB devices (experimental)** is on.
 
+## MIDI controllers, MIDI learn and the OMX-27 (A6)
+
+As on iOS (its README's section of that name): **MIDI & audio › MIDI input** (All, None, or one device, remembered by
+its name: Android gives a device a new id each time it connects) lists Android's USB and Bluetooth MIDI devices
+(MidiManager), never the FM-1 (Fm1Candidate's rule, the website's name test for a virtual one) and never the OMX-27
+while it is in remote mode. A controller's channel messages go to the engine as host MIDI (`rfme_midi_in`): learn
+first, then the learned map (when **Use learned knobs** is on), then **Keys from MIDI** (Any, a channel, Off; a page),
+**Transpose** (octaves) and "...and reach the firmware's MIDI in", the rest to the firmware. Android opens a device's
+ports for one app at a time on some devices: a controller another app holds shows "can't open" and says so.
+
+**Knobs from MIDI › Learn** closes the sheet; the faceplate outlines its 22 learnable controls (7 encoders, MASTER, 14
+buttons), a tap picks one, the next CC or note binds to it (a toast says what), Forget / Done on the bar. The mappings
+(an encoder's mode on a page of its own, × removes), Knob speed, Use learned knobs and Clear all are on the MIDI &
+audio page; a learned MASTER pot waits to pick MASTER up (a mark on MASTER and a toast). The map is iOS's
+`midi-map.json` (the website's `prefs.midiMap`, the same ids) in the app's files, run on the engine's core thread
+(`rfme_set_midi_map`). **Connect my OMX-27** (the OMX-27 firmware with REMOTE mode, over USB): its keys, encoder and
+pots play the panel, the app lights its 27 keys and draws its 128 x 32 screen; it connects by itself at the next start
+and when it is plugged in again; Stop (the notification) clears its LEDs and screen.
+
+**Velocity & pressure from my FM-1** (on by default; RemoteFM1 0.3.1 or later): the link's TOUCH (`rfmc_set_key_touch`);
+Diagnostics' touch row says what the unit confirmed. The settings are iOS's dictionary (`rfm1.midiSettings`).
+
+**Firmware › Open its editor** (ChoralRoot and PurpleMonkey, Felucca, Melodee, JIANT, GHOULBOX: the managers
+remotefm1.com hosts) opens the site's page full screen in a WebView, with iOS's Web MIDI injected at document start
+(androidx.webkit, only for https://remotefm1.com; where the WebView can't, when the page starts): one port each way
+named as the firmware's USB port, SysEx granted, the site's shim told to stand aside. The page's SysEx goes to the
+firmware whole (`rfme_sysex_in`), its other messages to the firmware's MIDI in, the firmware's MIDI out back as whole
+messages; the bridge (`window.fm1mgr`) answers only while the page is on remotefm1.com over https. Opening it keeps a
+safety copy first ("before manager write"). Links to other sites open in the browser; an editor's `blob:` downloads
+(backups) are not saved yet.
+
+Tests: `./gradlew :app:testDebugUnitTest` has `MidiMapTest`, `MidiSettingsTest`, `OmxTest` (the wire, the views and
+OmxLink against a fake OMX-27 on a fake clock) and `ManagerListTest`; on the emulator `MidiEngineTest` (the map,
+learn, pickup and keys in ChoralRoot; a 3 KB SysEx through the echo core and back), `PanelMidiTest`, `OmxScreenTest`,
+`MidiDevicesTest` (the debug build's virtual keyboard and OMX-27 through Android's MIDI service: the keyboard plays the
+keys, a learned knob turns KN1, the OMX-27 plays the panel, comes back after it is unplugged, Disconnect clears it) and
+`ManagerTest` (ChoralRoot's manager from remotefm1.com connects and reads the running firmware).
+
 ## iOS → Android file map
 
 | RemoteFM1IOS (0d1a98b) | RemoteFM1Android | |
@@ -280,8 +318,17 @@ opens, stalls and how many streams exist.
 | `CorePlayer.swift` (safety copies, checkVersion, wipedCopy, saveState/loadState, currentFlashes) | `app/.../data/DataSafety.kt` (plain functions the player calls) | A5 |
 | Apple's Compression (LZFSE) | `native/lzfse/` (lzfse-1.0, BSD-3) + `data/Lzfse.kt` | A5; byte for byte the same stream |
 | `FlashHistoryTests`, `StateLibraryTests`, `StateFileTests` | `app/src/test/.../data/` (+ `IosCompatTest`: files the iOS code wrote) | A5 |
+| (edf2039) `MIDI/MidiMap.swift`, `MidiLearn.swift`, `MidiMapStore.swift`, `ControllerInput.swift`; `AUv3/Shared.swift` (AUSettings) | `app/.../midi/` (MidiMap, MidiLearn, MidiMapStore, ControllerInput + MidiParser, MidiSettings) | A6; MidiManager byte streams instead of UMP; one process: listeners instead of Darwin notifications |
+| (edf2039) `OMX27/*.swift` | `app/.../omx/` (OmxWire, OmxViews, OmxScreen, OmxTransport, OmxLink, PanelOmxTarget) | A6; OmxAndroidMidi instead of OmxCoreMIDI (no UMP) |
+| (edf2039) `Faceplate/LearnMode.swift`, `LearnViews.swift`, `Toast.swift`, `MidiSheet.swift`, `PanelFeed.swift` (sources, pickup) | `ui/faceplate/LearnMode.kt`, `LearnViews.kt`, `PanelFeed.kt`, `ui/MidiSheet.kt` | A6 |
+| (edf2039) `Managers/ManagerBridge.swift`, `ManagerPage.swift`; `CorePlayer.swift` (manager*); `App/AppMidi.swift` | `app/.../managers/`, `AppMidi.kt` | A6; WebView, document-start script, `@JavascriptInterface` |
+| (edf2039) `MidiMapTests`, `MidiEngineTests`, `OmxTests`, `PanelMidiTests`, `ManagerTests`, `TouchTests` (settings) | `app/src/test/.../midi/`, `omx/`, `managers/`; `app/src/androidTest/.../midi/MidiEngineTest.kt`, `PanelMidiTest.kt`, `omx/OmxScreenTest.kt`, `MidiDevicesTest.kt`, `managers/ManagerTest.kt` | A6 |
 
 ## Licence
 
-GPL-3.0-only (LICENSE), as RemoteFM1IOS; LICENSES/ holds MPL-2.0 for the files under it (`RFMMidiMap.*`). Oboe is
+GPL-3.0-only (LICENSE), as RemoteFM1IOS, except these files, which are MPL-2.0 (LICENSES/MPL-2.0.txt; as on iOS, the
+author's decision of 2026-10-30): the MIDI map and learn (`native/rfmcore/RFMMidiMap.{h,cpp}`,
+`app/.../midi/MidiMap.kt`, `MidiLearn.kt`), the OMX-27 (`app/.../omx/OmxWire.kt`, `OmxViews.kt`, `OmxScreen.kt`,
+`OmxTransport.kt`, `OmxLink.kt`) and their tests (`app/src/test/.../midi/MidiMapTest.kt`, `omx/OmxTest.kt`,
+`app/src/androidTest/.../midi/MidiEngineTest.kt`, `omx/OmxScreenTest.kt`). Each file's SPDX line says which. Oboe is
 Apache-2.0, androidx and Compose Apache-2.0; lzfse (`native/lzfse`, Apple's) BSD-3-Clause (its LICENSE); the cores carry their own licences (their descriptors' credits).

@@ -140,8 +140,8 @@ object RfmMidi {
         return d
     }
 
-    private fun mayConnect(): Boolean = Build.VERSION.SDK_INT < 31 ||
-        ctx.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+    private fun mayConnect(): Boolean = Build.VERSION.SDK_INT < 31 || (::ctx.isInitialized &&
+        ctx.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED)
 
     // (the handler thread)
     private fun consider(info: MidiDeviceInfo) {

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- (debug builds) A6's test keyboard, FakeControllerService: one output port (what it plays) -->
+<devices>
+    <device manufacturer="RemoteFM1" product="Test Keyboard" name="RFM Test Keyboard">
+        <output-port name="out" />
+    </device>
+</devices>
