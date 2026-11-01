@@ -18,6 +18,7 @@
 #include "RFMCore.h"
 #include "RFMOboe.h"
 #include "RFMRealtime.h"
+#include "RFMWasm.h"
 
 namespace {
 
@@ -167,6 +168,16 @@ JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeDestroy(JNIE
 }
 
 // "" ok, else the error
+// (A4) an .rfm1 file (wasm3: RFMWasmCore.cpp, rfme_load_wasm): checked, then its own instance for this engine;
+// "" ok, else the one-line reason
+JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeLoadWasm(JNIEnv *env, jclass, jlong p, jstring path)
+{
+    Lock l(host(p)->ctl);
+    char err[512] = {};
+    const int ok = rfme_load_wasm(host(p)->e, jstr(env, path).c_str(), err, sizeof err);
+    return utf(env, ok ? "" : (err[0] ? err : "load failed"));
+}
+
 JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeLoad(JNIEnv *env, jclass, jlong p, jstring id)
 {
     Lock l(host(p)->ctl);
@@ -627,6 +638,71 @@ JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeColours(JNIE
 JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTestDisconnect(JNIEnv *, jclass, jlong p)
 {
     rfmo_test_disconnect(host(p)->out);
+}
+
+// ---- A3: the faceplate (ui/faceplate/PanelFeed.kt), polled every frame: no allocations
+
+// the LCD as RGBA8888 straight into a direct buffer (240 x 240 x 4) when it changed since `have`; its number
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativePreviewDirect(JNIEnv *env, jclass, jlong p, jint have,
+                                                                                   jobject buf)
+{
+    void *dst = buf ? env->GetDirectBufferAddress(buf) : nullptr;
+    if (!dst || env->GetDirectBufferCapacity(buf) < 240 * 240 * 4)
+        return 0;
+    return (jint)rfme_preview(host(p)->e, (uint32_t)have, static_cast<uint8_t *>(dst));
+}
+
+// rfme_panel into out (at least 56 ints): seq, keys, labels, enc[7], master, booted, play_green, master_pot,
+// pickup_seq, key_led[27], btn_led[14]; returns seq
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativePanel(JNIEnv *env, jclass, jlong p, jintArray out)
+{
+    rfme_panel_t s;
+    const uint32_t seq = rfme_panel(host(p)->e, &s);
+    if (!out || env->GetArrayLength(out) < 56)
+        return (jint)seq;
+    jint v[56];
+    int n = 0;
+    v[n++] = (jint)seq;
+    v[n++] = (jint)s.keys;
+    v[n++] = (jint)s.labels;
+    for (int i = 0; i < 7; i++)
+        v[n++] = s.enc[i];
+    v[n++] = s.master;
+    v[n++] = s.booted;
+    v[n++] = s.play_green;
+    v[n++] = s.master_pot;
+    v[n++] = s.pickup_seq;
+    for (int i = 0; i < 27; i++)
+        v[n++] = s.key_led[i];
+    for (int i = 0; i < 14; i++)
+        v[n++] = s.btn_led[i];
+    env->SetIntArrayRegion(out, 0, n, v);
+    return (jint)seq;
+}
+
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeButtonNamesGen(JNIEnv *, jclass, jlong p)
+{
+    return (jint)rfme_button_names_gen(host(p)->e);
+}
+
+// the firmware's button names: "<gen>\n<loaded>\n<use>\n" then the 14 names, one per line (newlines in a name become
+// spaces)
+JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeButtonNames(JNIEnv *env, jclass, jlong p)
+{
+    rfme_button_names_t b;
+    const uint32_t g = rfme_button_names(host(p)->e, &b);
+    std::string s = std::to_string(g) + "\n" + std::to_string(b.loaded) + "\n" + std::to_string(b.use) + "\n";
+    for (int i = 0; i < 14; i++) {
+        std::string n(b.names[i], strnlen(b.names[i], sizeof b.names[i]));
+        std::replace(n.begin(), n.end(), '\n', ' ');
+        s += n + "\n";
+    }
+    return env->NewStringUTF(s.c_str());
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetButtonNames(JNIEnv *, jclass, jlong p, jboolean use)
+{
+    rfme_set_button_names(host(p)->e, use ? 1 : 0);
 }
 
 } // extern "C"

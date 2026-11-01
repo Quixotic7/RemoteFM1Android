@@ -27,6 +27,8 @@ outputs only with Settings › Sound through USB devices (experimental). A2's "h
 dropped for this tablet. Third round: docs/A1-DEVICE-TEST.md (Bluetooth, sound spam on the speaker, 5 minutes over
 USB MIDI; no USB audio).
 
+A3 built on the headless emulator (2026-11-01): the faceplate in Compose (ui/: Full for phone portrait, phone landscape, tablet landscape and portrait; Controls; Screen; the themes, the editor, the four fonts; display alone; the screen protector; the firmware's button names; the pull-down sheet with iOS's pages and wording), the engine polled every frame with no allocations (RfmEngine.panel / previewDirect); A4's firmware/, A5's data/ and A7's install/ + cart/ wired to the sheet's pages (AppModel: catalog keys, .rfm1 loads, the data steps, the FM-1 lent to an install or a send). The app now starts in Core mode with the sound on (the test pattern is in Diagnostics, as on iOS). scripts/emu_shots.sh takes the iOS sim_shots set on the emulator (phone sizes by `wm size`).
+
 Owner's answers (2026-11-01): install the Android tooling (yes); test device: the owner's Samsung Galaxy Tab A9+
 (SM-X210, Android 16 / API 36, arm64, 1200x1920; adb serial R95Y906QALT; Samsung's Auto Blocker must be off for adb and
 sideloading); copy RFMCore from RemoteFM1IOS (yes); app id `com.quixotic7.remotefm1`, name "RemoteFM1"; a local

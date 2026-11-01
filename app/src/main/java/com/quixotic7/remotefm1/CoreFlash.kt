@@ -20,7 +20,11 @@ import java.util.concurrent.TimeUnit
 class CoreFlash(
     private val engine: RfmEngine,
     val dir: File,
-    /** a core id's version (the sidecar's), null when unknown */
+    /** (A3, A4's catalog keys) a key's flash file (an imported core's is rfm1-<id>.bin); null: dir/<key>.bin */
+    private val fileOf: ((String) -> File)? = null,
+    /** (A3) a key's firmware id for the sidecar */
+    private val idOf: (String) -> String = { it },
+    /** a core id's version (the sidecar's), null when unknown (last: the tests pass it as a trailing lambda) */
     private val versionOf: (String) -> String? = { null },
 ) {
     var bootedId: String? = null
@@ -42,7 +46,7 @@ class CoreFlash(
         dir.mkdirs()
     }
 
-    fun file(id: String) = File(dir, "$id.bin")
+    fun file(id: String) = fileOf?.invoke(id) ?: File(dir, "$id.bin")
 
     /**
      * After a load: the core [id] powered on from its file (a fresh flash when it has none). Returns null when it
@@ -146,7 +150,7 @@ class CoreFlash(
         val version = versionOf(id) ?: ""
         io.execute {
             try {
-                FlashFile.write(data, f, firmwareID = id, version = version)
+                FlashFile.write(data, f, firmwareID = idOf(id), version = version)
                 lastError = ""
                 onWritten?.let { runCatching { it(id, data) } }
             } catch (e: Exception) {

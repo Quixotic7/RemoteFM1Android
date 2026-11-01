@@ -16,6 +16,9 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
     /** Loads the core [id] (libfm1core_<id>.so); null on success, else the error. */
     fun load(id: String): String? = nativeLoad(handle, id).ifEmpty { null }
 
+    /** (A4) Loads the .rfm1 file at [path] (wasm3: its own instance for this engine); null on success, else the reason. */
+    fun loadWasm(path: String): String? = nativeLoadWasm(handle, path).ifEmpty { null }
+
     /** Powers the core on from [flash] (null: a fresh flash). */
     fun boot(flash: ByteArray? = null): Boolean = nativeBoot(handle, flash)
 
@@ -155,6 +158,28 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
     /** The LCD (240 x 240 RGBA) into [rgba] when it changed since [have]; returns its number. */
     fun preview(have: Int, rgba: ByteArray): Int = nativePreview(handle, have, rgba)
 
+    // ---- A3: the faceplate's reads (ui/faceplate/PanelFeed.kt), every frame, no allocations
+    /** The LCD (240 x 240 RGBA) into the direct buffer [rgba] when it changed since [have]; returns its number. */
+    fun previewDirect(have: Int, rgba: java.nio.ByteBuffer): Int = nativePreviewDirect(handle, have, rgba)
+
+    /** rfme_panel into [out] (56 ints, PanelFeed's layout); returns its seq (0: none yet). */
+    fun panel(out: IntArray): Int = nativePanel(handle, out)
+
+    /** Moves when the running core or the button-names setting changed. */
+    val buttonNamesGen: Int get() = nativeButtonNamesGen(handle)
+
+    /** gen, loaded, use, then the 14 names (FM1P_B_* order), one per line. */
+    fun buttonNamesText(): String = nativeButtonNames(handle)
+
+    /** The matrix id of a button label (B_*), after boot; -1. */
+    fun matrixButtonId(label: Int): Int = nativeMatrixButton(handle, label)
+
+    /** The matrix encoder of a knob role (E_*), after boot; -1. */
+    fun matrixEncoderId(role: Int): Int = nativeMatrixEncoder(handle, role)
+
+    /** The "Firmware's button names" setting (rfme_set_button_names). */
+    fun setButtonNames(use: Boolean) = nativeSetButtonNames(handle, use)
+
     override fun close() {
         if (handle != 0L) {
             nativeDestroy(handle)
@@ -198,6 +223,7 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         @JvmStatic private external fun nativeRenderBlocks(h: Long, count: Int, frames: Int, rate: Double, level: DoubleArray): IntArray
         @JvmStatic private external fun nativeDestroy(h: Long)
         @JvmStatic private external fun nativeLoad(h: Long, id: String): String
+        @JvmStatic private external fun nativeLoadWasm(h: Long, path: String): String
         @JvmStatic private external fun nativeBoot(h: Long, flash: ByteArray?): Boolean
         @JvmStatic private external fun nativeSetClock(h: Long, owner: Int)
         @JvmStatic private external fun nativeKey(h: Long, key: Int, down: Boolean, vel: Int): Boolean
@@ -229,5 +255,10 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         @JvmStatic private external fun nativeStreamInfo(s: Long, refresh: Boolean, out: LongArray)
         @JvmStatic private external fun nativeClockSwap(h: Long, from: Int, to: Int): Boolean
         @JvmStatic private external fun nativeTestAudioHang(h: Long, closeMs: Int, openMs: Int)
+        @JvmStatic private external fun nativePreviewDirect(h: Long, have: Int, rgba: java.nio.ByteBuffer): Int
+        @JvmStatic private external fun nativePanel(h: Long, out: IntArray): Int
+        @JvmStatic private external fun nativeButtonNamesGen(h: Long): Int
+        @JvmStatic private external fun nativeButtonNames(h: Long): String
+        @JvmStatic private external fun nativeSetButtonNames(h: Long, use: Boolean)
     }
 }

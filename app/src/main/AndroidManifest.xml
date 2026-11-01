@@ -21,6 +21,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- (A4) Get firmware: remotefm1.com's catalog and the RemoteFM1FW releases on GitHub -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:label="@string/app_name"
         android:theme="@android:style/Theme.Material.NoActionBar">
@@ -39,7 +42,113 @@
             <meta-data
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
+            <!-- (A5) a .rfm1state opened from a file manager, a download or a share (data/DataFolder.kt: Incoming).
+                 Android matches extensions only on paths, so: our own shares' type, and the path patterns for the
+                 providers that keep the name in the path -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/vnd.quixotic7.remotefm1.state" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.rfm1state" />
+                <data android:pathPattern=".*\\..*\\.rfm1state" />
+                <data android:pathPattern=".*\\..*\\..*\\.rfm1state" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.rfm1state" />
+            </intent-filter>
+            <!-- (A4) an .rfm1 firmware opened from a file manager, a browser's download or a share
+                 (firmware/FirmwareCenter.kt: firmwareUri, open). Android has no type for .rfm1: the path patterns for
+                 providers that keep the name in the path (any type, or none), and application/octet-stream (what
+                 most give an unknown file; also the share sheet), the name checked by the app -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.rfm1" />
+                <data android:pathPattern=".*\\..*\\.rfm1" />
+                <data android:pathPattern=".*\\..*\\..*\\.rfm1" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.rfm1" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.rfm1" />
+                <data android:pathPattern=".*\\..*\\.rfm1" />
+                <data android:pathPattern=".*\\..*\\..*\\.rfm1" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.rfm1" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+            <!-- (A7) a DX7 cartridge (.syx) opened from a file manager, a download or a share: Send a DX7 cartridge
+                 (cart/AndroidCartTransport.kt: read). As for .rfm1: the path patterns (any type, or none), the SysEx
+                 types some apps give it; application/octet-stream is the filter above (the name checked by the app) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.syx" />
+                <data android:pathPattern=".*\\..*\\.syx" />
+                <data android:pathPattern=".*\\..*\\..*\\.syx" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.syx" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.syx" />
+                <data android:pathPattern=".*\\..*\\.syx" />
+                <data android:pathPattern=".*\\..*\\..*\\.syx" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.syx" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/x-sysex" />
+                <data android:mimeType="audio/x-syx" />
+                <data android:mimeType="audio/syx" />
+            </intent-filter>
         </activity>
+
+        <!-- (A5) a state or a backup shared through the share sheet (files in the cache's share/) -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/share_paths" />
+        </provider>
 
         <service
             android:name=".PlaybackService"

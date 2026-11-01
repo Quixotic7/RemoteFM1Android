@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
-// Copied from RemoteFM1IOS 0d1a98b RFMKit/Sources/RFMCore/RFMCoreBackend.h; changes: none (the Wasm factory is declared, not built: A4).
+// Copied from RemoteFM1IOS 0d1a98b RFMKit/Sources/RFMCore/RFMCoreBackend.h; changes: none (the Wasm factory: RFMWasmCore.cpp, A4).
 // The core backend (M7): one running firmware image behind one interface, so the engine (RFMEngine.cpp) and its
 // device clock (RFMDevice.h) don't care what runs the firmware. Two kinds:
 //

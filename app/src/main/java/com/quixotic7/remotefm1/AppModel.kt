@@ -25,6 +25,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.quixotic7.remotefm1.data.DataChanges
+import com.quixotic7.remotefm1.data.DataSafety
+import com.quixotic7.remotefm1.data.FlashHistory
+import com.quixotic7.remotefm1.data.StateLibrary
+import com.quixotic7.remotefm1.firmware.CoreInfo
+import com.quixotic7.remotefm1.firmware.CoreRef
+import com.quixotic7.remotefm1.firmware.FirmwareCenter
 import org.json.JSONObject
 import java.io.File
 import java.nio.ByteBuffer
@@ -67,7 +74,25 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     val link = RfmLink(backend, virtualName = if (options.virtual) Fm1Candidate.VIRTUAL_NAME else "")
     val engine = RfmEngine(link)
     val cores: List<JSONObject>
-    val flash = CoreFlash(engine, File(ctx.filesDir, "cores")) { id -> cores.firstOrNull { it.getString("id") == id }?.getString("version") }
+    /** (A4, wired in A3) the firmware: built-in cores and imported .rfm1 files by catalog key, Get firmware */
+    val fw: FirmwareCenter = FirmwareCenter.android(ctx)
+    /** (A5, wired in A3) safety copies, named states, the player's data hooks */
+    val history = FlashHistory(FlashHistory.defaultRoot(ctx.filesDir))
+    val stateLib = StateLibrary(StateLibrary.defaultRoot(ctx.filesDir))
+    val safety = DataSafety(history, stateLib, { fw.flashFile(it) }) { k ->
+        // (the flash size checked against a state's: the running engine's; the descriptor's flash_size can differ from
+        // the image the device keeps: ChoralRoot 0.26.1 says 1048580, its flash image is 1048576)
+        fw.core(k)?.let { DataSafety.Firmware(it.id, it.firmwareID, it.name, it.kind, it.version, it.sha256,
+                                              if (k == booted) engine.flashSize else 0) }
+    }
+    val flash = CoreFlash(engine, File(ctx.filesDir, "cores"), versionOf = { fw.core(it)?.version },
+                          fileOf = { fw.flashFile(it) }, idOf = { fw.core(it)?.firmwareID ?: it })
+    /** the firmware to pick from (built in, then imported) */
+    var catalog by mutableStateOf<List<CoreInfo>>(emptyList())
+        private set
+    /** moves when the states or the safety copies changed (DataChanges) */
+    var dataGen by mutableIntStateOf(0)
+        private set
     val outputs = AudioOutputs(ctx) { outputsChanged(it) }
     val audio = AudioControl(engine.streams, log = { Log.i(TAG, it) },
                              onNotice = { what, out -> main.post { audioNotice(what, out) } },
@@ -130,6 +155,8 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     var bleConnecting by mutableStateOf(false)
         private set
     val previewFrame = mutableIntStateOf(0)                          // moves when [preview] changed
+    /** (A3) Diagnostics shows [preview]: copied only while it does (the faceplate reads the engine itself) */
+    var previewWanted = false
     val preview: Bitmap = Bitmap.createBitmap(240, 240, Bitmap.Config.ARGB_8888)
 
     val reconnect = ReconnectPolicy(prefs.getString(KEY_BLE, null))
@@ -145,17 +172,30 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         RfmEngine.scan(ctx.applicationInfo.nativeLibraryDir)
         val a = RfmEngine.cores().getJSONArray("cores")
         cores = (0 until a.length()).map { a.getJSONObject(it) }.sortedBy { ORDER.indexOf(it.getString("id")).let { i -> if (i < 0) 99 else i } }
-        val wanted = options.core ?: prefs.getString(KEY_CORE, null)
-        selected = pick(wanted, cores.map { it.getString("id") }) ?: "choralroot"
-        if (wanted != null && wanted != selected) fallbackNote = "$wanted is not in this build: ${nameOf(selected)} instead"
-        if (options.core != null) prefs.edit().putString(KEY_CORE, selected).apply()     // (a launch extra is remembered too)
+        fw.start(CoreInfo.builtInList(RfmEngine.cores()))
+        catalog = fw.catalog.value
+        fw.wireStore(changed = { main.post { catalog = fw.catalog.value } }, replace = { old, new ->
+            // (an update replaces older files: a safety copy first; the selection follows to the new key)
+            old.forEach { o -> runCatching { safety.safetyCopy(o.key, FlashHistory.Reason.BeforeUpdate(o.version, new.version)) } }
+            main.post {
+                catalog = fw.catalog.value
+                if (old.any { it.key == selected }) select(new.key)
+            }
+        })
+        fw.checkAtLaunch()
+        flash.onWritten = { k, d -> safety.written(k, d) }
+        DataChanges.add { main.post { dataGen++ } }
+        val r = fw.resolveSelection(options.core, CoreRef.fromJson(prefs.getString(KEY_CORE_REF, null)), prefs.getString(KEY_CORE, null))
+        selected = r?.key ?: pick(options.core, cores.map { it.getString("id") }) ?: "choralroot"
+        fallbackNote = r?.note ?: ""
+        saveSelection()
         outputList = outputs.list
         outputPick = prefs.getString(KEY_OUTPUT, AudioRoute.AUTO)?.takeIf { it != AudioRoute.USB } ?: AudioRoute.AUTO
         usbAudio = prefs.getBoolean(KEY_USB_AUDIO, false)
         engine.setMidi()
         enableVirtual(options.virtual)                      // (listed to other apps only when asked for)
         RfmMidi.start(ctx, link.let { if (options.virtual) Fm1Candidate.VIRTUAL_NAME else "" })
-        RfmMidi.addListener { main.post { link.rescan(); refreshMidi() } }
+        RfmMidi.addListener { main.post { if (!linkPaused) link.rescan(); refreshMidi() } }
         Log.i(TAG, "backend $backend, cores ${cores.map { it.getString("id") }}, last Bluetooth unit ${reconnect.address}")
         val src = when (options.source) {
             "tablet" -> Source.TABLET
@@ -166,11 +206,11 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         val m = when (options.mode) {
             "core" -> Mode.CORE
             "pattern" -> Mode.PATTERN
-            else -> if (prefs.getString(KEY_MODE, "pattern") == "core") Mode.CORE else Mode.PATTERN
+            else -> if (prefs.getString(KEY_MODE, "core") == "core") Mode.CORE else Mode.PATTERN   // (A3: the faceplate plays the core, as on iOS)
         }
         useMode(m)
         options.output?.let { chooseOutput(it) }
-        options.sound?.let { setSound(it) }
+        setSound(options.sound ?: prefs.getBoolean(KEY_SOUND, true), remember = options.sound == null)   // (A3: on at launch, as on iOS)
         tick()
     }
 
@@ -207,9 +247,9 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     }
 
     fun select(id: String) {
-        if (cores.none { it.getString("id") == id }) return
+        if (fw.core(id) == null) return
         selected = id
-        prefs.edit().putString(KEY_CORE, id).apply()
+        saveSelection()
         if (id != booted) fallbackNote = ""
         if (mode == Mode.CORE) {
             // (the stream plays on: the engine keeps the clock through the load and boot, and its ring plays
@@ -222,9 +262,10 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         playingChanged()
     }
 
-    fun setSound(on: Boolean) {
+    fun setSound(on: Boolean, remember: Boolean = true) {
         Log.i(TAG, "user: sound ${if (on) "on" else "off"} (output pick $outputPick)")
         soundOn = on
+        if (remember) prefs.edit().putBoolean(KEY_SOUND, on).apply()
         if (on) audioRetry++                                    // (turned on again: past failures forgotten)
         pushAudio()
         playingChanged()
@@ -251,6 +292,70 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         } else {
             message = ""
         }
+    }
+
+    // ---------------------------------------------------------------- (A5, wired in A3) the firmware's data
+    // iOS CorePlayer's saveState / loadState / restore / resetFlash: the flash saved (or the core let go) first, the
+    // data step (DataSafety), then the firmware powered on again from its new flash. Each says what happened in
+    // [message]; a refused step says why.
+
+    /** the running core powered on again from its flash file (after a load, restore or reset wrote it) */
+    private fun rebootFromFile() {
+        booted = null
+        if (mode != Mode.CORE) return
+        if (!bootSelected()) useMode(Mode.PATTERN) else {
+            engine.clockSwap(RfmEngine.CLOCK_NONE, RfmEngine.CLOCK_TIMER)
+            pushAudio()
+        }
+    }
+
+    private val clockRunning: Boolean
+        get() = engine.status().optInt("clock").let { it == RfmEngine.CLOCK_AUDIO || it == RfmEngine.CLOCK_TIMER }
+
+    /** Save state…: the memory saved now, then kept under [name] with MASTER ([master]) */
+    fun saveState(name: String, master: Int?) {
+        val key = selected
+        val write = {
+            message = try { safety.savedMessage(safety.saveState(key, name.trim(), master = master)) }
+            catch (e: Exception) { e.message ?: "The state wasn't saved." }
+        }
+        if (booted == key) flash.saveNow(main, clockRunning) { flash.flush(); write() } else write()
+    }
+
+    /** a state's memory loaded (a safety copy of the current one first), MASTER sent */
+    fun loadState(s: com.quixotic7.remotefm1.data.SavedState) {
+        val key = selected
+        val l = try { safety.prepareLoad(key, s) } catch (e: Exception) { message = e.message ?: "The state wasn't loaded."; return }
+        if (booted == key) { flash.unload(); flash.flush() }
+        safety.writeFlash(key, l.flash)
+        rebootFromFile()
+        l.master?.let { engine.event(4, 0, it) }               // (RFMC_EV_MASTER)
+        message = l.message
+    }
+
+    /** a safety copy put back (the current memory kept as a copy first) */
+    fun restoreCopy(snap: FlashHistory.Snapshot) {
+        val key = selected
+        val d = try { safety.prepareRestore(key, snap) } catch (e: Exception) { message = e.message ?: "Not restored."; return }
+        if (booted == key) { flash.unload(); flash.flush() }
+        safety.writeFlash(key, d)
+        rebootFromFile()
+        message = safety.restoreMessage(snap)
+    }
+
+    /** Reset firmware…: a copy of the memory kept, then the firmware started with a clean one */
+    fun resetFlash() {
+        val key = selected
+        if (booted == key) { flash.unload(); flash.flush() }
+        safety.reset(key)
+        rebootFromFile()
+        message = safety.resetMessage(key)
+    }
+
+    /** (Back up everything) the running core's memory saved now; then [done] on the main thread */
+    fun saveForBackup(done: () -> Unit) {
+        if (booted == null) return done()
+        flash.saveNow(main, clockRunning) { flash.flush(); done() }
     }
 
     /** the app goes to the background (MainActivity.onStop): the flash saved now, the clock left running */
@@ -319,7 +424,14 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
             flash.unload()
             booted = null
         }
-        val err = engine.load(selected)
+        // (A4) a built-in core's flash from before the catalog keys adopted; another version's flash: a copy first (A5)
+        runCatching { fw.adoptBuiltInFlash(selected) { d, id, v, from, to -> history.record(d, id, v, FlashHistory.Reason.BeforeUpdate(from, to)) } }
+        runCatching { safety.checkVersion(selected) }
+        val err = when (val t = fw.loadTarget(selected)) {
+            is FirmwareCenter.LoadTarget.Native -> engine.load(t.id)
+            is FirmwareCenter.LoadTarget.Wasm -> engine.loadWasm(t.path)
+            null -> "not in the catalog"
+        }
         if (err != null) {
             message = "cannot load $selected: $err"
             return false
@@ -334,18 +446,82 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         return true
     }
 
-    private fun nameOf(id: String) = cores.firstOrNull { it.getString("id") == id }?.getString("name") ?: id
+    private fun nameOf(id: String) = fw.core(id)?.name ?: id
+
+    /** the selection remembered as iOS's CoreRef (and the plain id for older builds) */
+    private fun saveSelection() {
+        val c = fw.core(selected) ?: return
+        prefs.edit().putString(KEY_CORE_REF, CoreRef(c).toJson()).putString(KEY_CORE, selected).apply()
+    }
+
+    // ---------------------------------------------------------------- (A7, wired in A3) the FM-1 lent out
+    /** an install or a cartridge send has the FM-1: the link stopped and kept closed (no reopen, rescan or retry) */
+    var linkPaused = false
+        private set
+
+    /** the panel's session ended and its ports closed until [resumeLink]; whether it was running */
+    suspend fun pauseLink(): Boolean {
+        val ran = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            val r = source == Source.FM1
+            linkPaused = true
+            link.stop()
+            r
+        }
+        repeat(60) {
+            val st = link.status()
+            if (st.optInt("wanted") == 0 && LinkState.of(st.optInt("state"), st.optInt("session_state", -1), false,
+                    st.optInt("ble") != 0, st.optString("text"), null).first is LinkState.Stopped) return ran
+            kotlinx.coroutines.delay(50)
+        }
+        return ran
+    }
+
+    /** the FM-1 given back; [restart]: the panel's session starts again */
+    fun resumeLink(restart: Boolean) {
+        main.post {
+            linkPaused = false
+            if (restart && source == Source.FM1) link.start()
+            link.rescan()
+        }
+    }
+
+    /** a line for the sheet (an opened file's notice) */
+    fun showMessage(t: String) { message = t }
+
+    /** the catalog read again (a file added or deleted) */
+    fun refreshCatalog() {
+        fw.rescan()
+        catalog = fw.catalog.value
+    }
+
+    /** (A4) an .rfm1 added (Add firmware…, Open with): copied in and checked off the main thread; played when good */
+    fun addFirmware(resolver: android.content.ContentResolver, uri: android.net.Uri) {
+        fw.open(resolver, uri) { f ->
+            main.post {
+                refreshCatalog()
+                if (f.error == null) {
+                    select(f.key)
+                    if (mode != Mode.CORE) useMode(Mode.CORE)
+                } else {
+                    message = "${f.file.ifEmpty { "The file" }}: ${f.error}"
+                }
+            }
+        }
+    }
+
+    /** the running firmware's catalog entry */
+    val current: CoreInfo? get() = catalog.firstOrNull { it.id == selected }
 
     /** the playing stream's device (0: none) */
     val playingOn: Int get() = engineStatus.optJSONObject("audio")?.takeIf { it.optInt("open") != 0 }?.optInt("device_id") ?: 0
 
     val coreName: String
-        get() = cores.firstOrNull { it.getString("id") == selected }?.let { "${it.getString("name")} ${it.getString("version")}" }
+        get() = fw.core(selected)?.let { "${it.name} ${it.version}" }
             ?: selected
 
     /** what the notification says: "RemoteFM1 is playing ChoralRoot" */
     val playingText: String
-        get() = if (mode == Mode.CORE) "RemoteFM1 is playing ${cores.firstOrNull { it.getString("id") == selected }?.getString("name") ?: selected}"
+        get() = if (mode == Mode.CORE) "RemoteFM1 is playing ${nameOf(selected)}"
         else "RemoteFM1: the test pattern on the FM-1"
 
     /** the engine or the link is running: the foreground service keeps them in the background */
@@ -387,6 +563,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     private var wasOpen = false
     private fun reconnectTick(now: Long) {
         val addr = reconnect.address ?: return
+        if (linkPaused) return                                  // (A7: an install or a cartridge has the FM-1)
         if (backend.isFake || !mayConnectBluetooth()) return
         val open = RfmMidi.bluetoothOpen(addr)
         if (wasOpen && !open) reconnect.failed(now)          // (it dropped)
@@ -436,7 +613,12 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         if (mode == Mode.CORE && booted != null) {
             flash.refresh(engineStatus)?.let { message = it }
         }
-        // the screen being sent: the core's in Core mode, the link's pattern otherwise
+        // the screen being sent: the core's in Core mode, the link's pattern otherwise (only while Diagnostics shows it)
+        if (!previewWanted) {
+            if (midiEntries.size != RfmMidi.entries().size) refreshMidi()
+            reconnectTick(SystemClock.elapsedRealtime())
+            return
+        }
         val seq: Int
         if (mode == Mode.CORE) {
             seq = engine.preview(coreSeq, rgba)
@@ -479,11 +661,13 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         const val PKG = "com.quixotic7.remotefm1"
         const val MAX_EVENTS = 12
         private const val KEY_CORE = "core"
+        private const val KEY_CORE_REF = "coreRef"
         private const val KEY_SOURCE = "source"
         private const val KEY_MODE = "mode"
         private const val KEY_BLE = "ble_address"
         private const val KEY_OUTPUT = "audio_output"
         private const val KEY_USB_AUDIO = "usb_audio"
+        private const val KEY_SOUND = "sound"
         /** the cores' order in the picker (RemoteFM1IOS CorePlayer.order) */
         val ORDER = listOf("choralroot", "felucca", "melodee", "fizz", "saadet", "boardwalk", "loom")
 

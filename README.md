@@ -261,7 +261,9 @@ opens, stalls and how many streams exist.
 | `RFMKit/Tests/RFMKitTests/FakeLinkTests.swift`, `TrsMidiTests.swift`, `TouchTests.swift` | `app/src/androidTest/.../LinkTest.kt` | + the virtual-device cases |
 | `App/RemoteFM1App.swift` (`-fake`, `-fakeble`) | `LaunchOptions` in `AppModel.kt` | adb `am start` extras |
 | `RFMKit/Package.swift` (CRemoteFM1 target) | `native/CMakeLists.txt` | libremotefm1 without the macOS back ends |
-| `RFMWasmCore.cpp`, `Sources/CWasm3` | not yet | A4 |
+| `RFMWasmCore.cpp`, `include/RFMWasm.h`, `Sources/CWasm3` | `native/rfmcore/RFMWasmCore.cpp`, `include/RFMWasm.h`, `rfm_wasm_jni.cpp`, `native/wasm3` | A4: own SHA-256, CLOCK_MONOTONIC, Android log |
+| `Firmware.swift`, `FirmwareFeeds.swift`, `FirmwareStore.swift`, `FirmwareThumbs.swift`, `CorePlayer.swift` (CoreInfo, CoreRef, pick, replacement, adoptBuiltInFlash) | `app/.../firmware/` (`FirmwareLibrary`, `FirmwareFeeds`, `FirmwareStore`, `FirmwareThumbs`, `Cores`, `FirmwareCenter`) | A4: files/Firmware is iOS's mirror (`<sha256>.rfm1` + index.json); a refused file is not kept |
+| `WasmTests.swift`, `ImportTests.swift`, `FirmwareStoreTests.swift`, `FirmwareThumbsTests.swift` | `app/src/test/.../firmware/` (JVM), `app/src/androidTest/.../firmware/FirmwareTest.kt`, `scripts/emu_firmwaretest.sh` | A4 |
 | `RFMKernel*`, `RFMLease`, `SharedFake`, `RFMProbe`, `RFMHostParams`, `RFMHostClock` | not ported | the AU's |
 | `cores/CMakeLists.txt` | `cores/CMakeLists.txt` | Android: ELF `.so`, version script, coroutine, lock |
 | `cores/fizz`, `cores/saadet`, `cores/boardwalk`, `cores/loom` | same | unchanged (no store build: `saadet_store` is configured, not built) |
@@ -274,8 +276,12 @@ opens, stalls and how many streams exist.
 | `RFMKit/Sources/RFMKit/AudioRoute.swift`, `CorePlayer.swift` (route change, audioConfigurationChanged) | `app/.../AudioOutput.kt`, `native/rfmcore/RFMOboe.cpp` (disconnect) | own picker (Android has no route picker) |
 | `RFMKit/Tests/RFMKitTests/CoreTests.swift` | `app/src/androidTest/.../CoresTest.kt` | A2 |
 | `FlashHistoryTests.swift` (FlashFile cases) | `app/src/test/.../FlashFileTest.kt` | |
+| `FlashHistory.swift` (`FlashHistory`), `StateLibrary.swift`, `StateFile.swift` (StateFile, import, StateMirror, Backup) | `app/.../data/` (FlashHistory, StateLibrary, StateFile, StateMirror, Backup, DataTree, DataFolder, Json) | A5; the mirror and backups in a folder the user picks (SAF); a backup is one .zip |
+| `CorePlayer.swift` (safety copies, checkVersion, wipedCopy, saveState/loadState, currentFlashes) | `app/.../data/DataSafety.kt` (plain functions the player calls) | A5 |
+| Apple's Compression (LZFSE) | `native/lzfse/` (lzfse-1.0, BSD-3) + `data/Lzfse.kt` | A5; byte for byte the same stream |
+| `FlashHistoryTests`, `StateLibraryTests`, `StateFileTests` | `app/src/test/.../data/` (+ `IosCompatTest`: files the iOS code wrote) | A5 |
 
 ## Licence
 
 GPL-3.0-only (LICENSE), as RemoteFM1IOS; LICENSES/ holds MPL-2.0 for the files under it (`RFMMidiMap.*`). Oboe is
-Apache-2.0, androidx and Compose Apache-2.0; the cores carry their own licences (their descriptors' credits).
+Apache-2.0, androidx and Compose Apache-2.0; lzfse (`native/lzfse`, Apple's) BSD-3-Clause (its LICENSE); the cores carry their own licences (their descriptors' credits).
