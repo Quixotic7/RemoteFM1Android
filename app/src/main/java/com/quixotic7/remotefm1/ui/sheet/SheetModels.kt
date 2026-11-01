@@ -30,6 +30,8 @@ data class FirmwareCard(
     val id: String, val name: String, val version: String,
     val author: String = "", val tag: String = "", val about: String = "", val license: String = "",
     val source: String? = null,
+    /** a Fantasy CFW (its manifest's "virtual": true) */
+    val fantasy: Boolean = false,
 )
 
 /** A4: the firmware here (built in and imported), its card and thumbnail, Get firmware and Add firmware */
@@ -47,6 +49,8 @@ interface FirmwarePagesModel {
     val addFirmware: (() -> Unit)?
     /** an imported file's delete (A4), null: none */
     fun delete(e: FirmwareEntry): (() -> Unit)?
+    /** an imported file's Fantasy CFW fields (FantasyCfw.Info), null: a built-in core or unknown */
+    fun fantasy(e: FirmwareEntry): com.quixotic7.remotefm1.firmware.FantasyCfw.Info? = null
 }
 
 /** a named state (iOS SavedState as the list shows it) */

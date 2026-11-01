@@ -40,5 +40,13 @@
                 android:name="android.media.midi.MidiDeviceService"
                 android:resource="@xml/fake_omx_device" />
         </service>
+        <!-- (Fantasy CFW) a SAF tree for SafRemoteFolder's tests: no DOCUMENTS_PROVIDER filter, so the system picker never
+             lists it; always enabled (switching a component on and off makes Android rescan the app's MIDI services) -->
+        <provider
+            android:name=".TestDocumentsProvider"
+            android:authorities="${applicationId}.testdocs"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS" />
     </application>
 </manifest>

@@ -196,6 +196,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         DataChanges.add { main.post { dataGen++; wipedCopy = safety.wipedCopy } }
         DataChanges.add { mirrorSync() }
         mirrorSync()
+        com.quixotic7.remotefm1.folder.RemoteFolderHost.refresh(ctx)     // (a Fantasy CFW's RemoteFM1 folder)
         val r = fw.resolveSelection(options.core, CoreRef.fromJson(prefs.getString(KEY_CORE_REF, null)), prefs.getString(KEY_CORE, null))
         selected = r?.key ?: pick(options.core, cores.map { it.getString("id") }) ?: "choralroot"
         fallbackNote = r?.note ?: ""
@@ -446,7 +447,9 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         runCatching { safety.checkVersion(selected) }
         val err = when (val t = fw.loadTarget(selected)) {
             is FirmwareCenter.LoadTarget.Native -> engine.load(t.id)
-            is FirmwareCenter.LoadTarget.Wasm -> engine.loadWasm(t.path)
+            // (a Fantasy CFW) its rules, and its declared memory against what this device can give now, before wasm3
+            is FirmwareCenter.LoadTarget.Wasm -> com.quixotic7.remotefm1.firmware.FantasyCfw.refusal(java.io.File(t.path))
+                ?: com.quixotic7.remotefm1.firmware.MemoryBudget.check(ctx, t.path) ?: engine.loadWasm(t.path)
             null -> "not in the catalog"
         }
         if (err != null) {

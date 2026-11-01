@@ -76,11 +76,13 @@ data class FirmwareDetails(
     val credits: String = "",
     /** rfm1.license.<n>: the first line is the licence's name */
     val licenses: List<String> = emptyList(),
+    /** a Fantasy CFW's fields (FantasyCfw.kt), read from the file itself */
+    val fantasy: FantasyCfw.Info = FantasyCfw.Info(),
 ) {
     companion object {
         /** read from the file (empty when it isn't a valid .rfm1) */
         fun read(path: String, r: Rfm1Checker): FirmwareDetails {
-            val m = runCatching { MiniJson.parse(r.text(path, "manifest")).obj() }.getOrNull()
+            val m = runCatching { MiniJson.parse(r.text(path, "manifest").ifEmpty { FantasyCfw.scan(java.io.File(path))?.manifest ?: "" }).obj() }.getOrNull()
             val lic = ArrayList<String>()
             for (i in 0 until 64) {
                 val t = r.text(path, "license.$i")
@@ -90,7 +92,7 @@ data class FirmwareDetails(
             return FirmwareDetails(
                 authors = m?.get("authors").arr()?.mapNotNull { it as? String } ?: emptyList(),
                 sourceURL = m?.str("source_url") ?: "", glueURL = m?.str("glue_url") ?: "", builtBy = m?.str("built_by") ?: "",
-                credits = r.text(path, "credits"), licenses = lic)
+                credits = r.text(path, "credits"), licenses = lic, fantasy = FantasyCfw.info(java.io.File(path)))
         }
     }
 }
@@ -129,7 +131,8 @@ class FirmwareLibrary(
             val n = f.name
             if (n.startsWith(".import-")) { f.delete(); continue }      // (a copy cut off)
             if (!n.endsWith(".rfm1") || n.removeSuffix(".rfm1") in known) continue
-            val r = checker.check(f.path)
+            val fantasy = FantasyCfw.refusal(f)
+            val r = if (fantasy != null) Result.failure(Rfm1Refused(fantasy)) else checker.check(f.path)
             val info = r.getOrNull()
             if (info == null || info.sha256 != n.removeSuffix(".rfm1")) {
                 log("sync: ${f.name} removed: ${r.exceptionOrNull()?.message ?: "its hash is not its name"}")
@@ -182,7 +185,10 @@ class FirmwareLibrary(
             _message.value = "${have.file} is already here"
             return have
         }
-        val r = checker.check(tmp.path)
+        // (a Fantasy CFW's own rules first: an unknown "needs" says "needs a newer RemoteFM1", not the native loader's
+        // "imports something unsupported")
+        val fantasy = FantasyCfw.refusal(tmp)
+        val r = if (fantasy != null) Result.failure(Rfm1Refused(fantasy)) else checker.check(tmp.path)
         val info = r.getOrNull()
         if (info == null) {
             tmp.delete()

@@ -64,6 +64,8 @@ data class AvailableFirmware(
     var editor: String = "",
     var repo: String = "",                      // "owner/name" on GitHub
     var beta: Boolean = false,
+    /** a Fantasy CFW (catalog.json's `virtual`, at the item or in its rfm1; the file's manifest decides once here) */
+    var virtual: Boolean = false,
     var downloads: List<Download> = emptyList(),    // the same version from each feed, the first tried first
 ) {
     data class Download(
@@ -103,6 +105,7 @@ data class AvailableFirmware(
         if (editor.isEmpty()) editor = o.editor
         if (sourceURL.isEmpty()) sourceURL = if (sameVersion || o.repo.isEmpty()) o.sourceURL else "https://github.com/${o.repo}"
         if (sameVersion && o.beta) beta = true
+        if (sameVersion && o.virtual) virtual = true
     }
 
     /** against the imported files: the same file, else the newest valid file of the same id */
@@ -120,7 +123,7 @@ data class AvailableFirmware(
     fun toMap(): Map<String, Any?> = linkedMapOf(
         "id" to id, "name" to name, "version" to version, "author" to author, "category" to category, "summary" to summary,
         "about" to about, "license" to license, "sourceURL" to sourceURL, "site" to site, "editor" to editor, "repo" to repo,
-        "beta" to beta, "downloads" to downloads.map { it.toMap() })
+        "beta" to beta, "virtual" to virtual, "downloads" to downloads.map { it.toMap() })
 
     companion object {
         /** "coralflower" -> "Coralflower" */
@@ -133,7 +136,7 @@ data class AvailableFirmware(
                 author = m.str("author") ?: "", category = m.str("category") ?: "", summary = m.str("summary") ?: "",
                 about = m.str("about") ?: "", license = m.str("license") ?: "", sourceURL = m.str("sourceURL") ?: "",
                 site = m.str("site") ?: "", editor = m.str("editor") ?: "", repo = m.str("repo") ?: "",
-                beta = m.bool("beta") ?: false, downloads = m["downloads"].arr()?.mapNotNull { Download.fromMap(it.obj()) } ?: emptyList())
+                beta = m.bool("beta") ?: false, virtual = m.bool("virtual") ?: false, downloads = m["downloads"].arr()?.mapNotNull { Download.fromMap(it.obj()) } ?: emptyList())
         }
     }
 }
@@ -189,7 +192,8 @@ data class FeedSnapshot(
                         val e = AvailableFirmware(f.id, name = f.name ?: "", version = f.version ?: "",
                             author = f.authorFull ?: f.author ?: "", category = f.category ?: "", summary = f.tag ?: "",
                             about = f.what ?: f.blurb ?: "", license = f.license ?: "", sourceURL = f.source ?: "",
-                            site = f.site ?: "", editor = f.editor ?: "", repo = f.repo ?: "", beta = f.beta ?: false)
+                            site = f.site ?: "", editor = f.editor ?: "", repo = f.repo ?: "", beta = f.beta ?: false,
+                            virtual = f.virtual == true || f.rfm1?.virtual == true)
                         details[f.id] = e.copy()
                         val r = f.rfm1 ?: continue
                         val path = r.url ?: r.file ?: continue
@@ -284,9 +288,10 @@ private class SiteItem(
     val id: String, val name: String?, val version: String?, val author: String?, val authorFull: String?,
     val category: String?, val tag: String?, val what: String?, val blurb: String?, val license: String?,
     val source: String?, val repo: String?, val site: String?, val editor: String?, val beta: Boolean?, val rfm1: Rfm1?,
+    val virtual: Boolean? = null,
 ) {
     class Rfm1(val file: String?, val url: String?, val sha256: String?, val version: String?, val fileName: String?,
-               val size: Long?, val authors: List<String>?)
+               val size: Long?, val authors: List<String>?, val virtual: Boolean? = null)
 
     companion object {
         fun of(m: Map<String, Any?>?): SiteItem? {
@@ -294,12 +299,13 @@ private class SiteItem(
             val r = m["rfm1"]?.let { v ->
                 val o = v.obj() ?: throw WrongType("rfm1")
                 Rfm1(o.optStr("file"), o.optStr("url"), o.optStr("sha256"), o.optStr("version"), o.optStr("fileName"),
-                    o.optInt("size"), o["authors"]?.let { a -> a.arr()?.map { it as? String ?: throw WrongType("authors") } ?: throw WrongType("authors") })
+                    o.optInt("size"), o["authors"]?.let { a -> a.arr()?.map { it as? String ?: throw WrongType("authors") } ?: throw WrongType("authors") },
+                    o.optBool("virtual"))
             }
             return SiteItem(m.str("id") ?: return null, m.optStr("name"), m.optStr("version"), m.optStr("author"),
                 m.optStr("authorFull"), m.optStr("category"), m.optStr("tag"), m.optStr("what"), m.optStr("blurb"),
                 m.optStr("license"), m.optStr("source"), m.optStr("repo"), m.optStr("site"), m.optStr("editor"),
-                m.optBool("beta"), r)
+                m.optBool("beta"), r, m.optBool("virtual"))
         }
     }
 }

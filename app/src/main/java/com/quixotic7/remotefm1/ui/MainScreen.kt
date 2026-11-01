@@ -74,6 +74,7 @@ fun MainScreen(a: AppUi, askNotifications: () -> Unit) {
                 a.model.wipedCopy?.let { c ->
                     WipedMemoryCard(c, a.current?.name ?: "The firmware") { a.model.answerWiped(it) }
                 }
+                FantasyFolderPrompt(a)                  // (a Fantasy CFW with no RemoteFM1 folder)
                 InstallPromptCard(p, install = { a.openSheet(SheetPageId.INSTALL) }, notNow = { a.appFm1.prompter.notNow() })
             }
         }

@@ -100,7 +100,13 @@ class AppFirmwarePages(private val a: AppUi) : FirmwarePagesModel {
 
     override fun card(e: FirmwareEntry): FirmwareCard {
         val i: FirmwareInfo = fw.info(e.id) ?: return FirmwareCard(e.firmwareId, e.name, e.version, license = e.license)
-        return FirmwareCard(i.id, i.name, i.version, i.author, i.tag, i.about, i.license, i.source)
+        return FirmwareCard(i.id, i.name, i.version, i.author, i.tag, i.about, i.license, i.source,
+                            fantasy = fantasy(e)?.virtual == true)
+    }
+
+    override fun fantasy(e: FirmwareEntry): com.quixotic7.remotefm1.firmware.FantasyCfw.Info? {
+        val c = fw.core(e.id) ?: return null
+        return if (c.imported) fw.library.details(c.sha256).fantasy else null
     }
 
     override fun thumbnail(firmwareId: String): ImageBitmap? {
@@ -115,10 +121,10 @@ class AppFirmwarePages(private val a: AppUi) : FirmwarePagesModel {
             val d = fw.library.details(c.sha256)
             val rows = listOf("licence" to c.license, "authors" to d.authors.joinToString(", ").ifEmpty { "–" },
                               "id" to c.firmwareID, "file" to c.fileName.ifEmpty { "–" }, "size" to "${c.fileSize / 1024} KiB",
-                              "SHA-256" to c.sha256.take(16) + "…")
+                              "SHA-256" to c.sha256.take(16) + "…") + FantasyAbout.rows(d.fantasy)
             val text = gpl + "The firmware above is an imported file under ${c.license.ifEmpty { "its licence" }}, from its " +
                 "author's release; it runs in the app's WebAssembly interpreter (wasm3, MIT). Its source is at " +
-                "${d.sourceURL.ifEmpty { "its author's site" }}." + (if (d.credits.isNotEmpty()) "\n\n${d.credits}" else "")
+                "${d.sourceURL.ifEmpty { "its author's site" }}." + FantasyAbout.text(d.fantasy) + (if (d.credits.isNotEmpty()) "\n\n${d.credits}" else "")
             return Pair(rows, text)
         }
         val rows = listOf("licence" to c.license.ifEmpty { "–" }, "family" to c.family.ifEmpty { "–" }, "core ABI" to "${c.abi}",
@@ -140,6 +146,13 @@ class AppFirmwarePages(private val a: AppUi) : FirmwarePagesModel {
             runCatching { m.safety.safetyCopy(c.id, FlashHistory.Reason.BeforeDelete("${c.name} ${c.version}")) } }
           m.refreshCatalog() }
     }
+}
+
+/** a catalog entry is a Fantasy CFW: the installed file's manifest when it is here (it decides), else the catalog's flag */
+private fun fantasy(a: AppUi, e: AvailableFirmware): Boolean {
+    val lib = a.model.fw.library
+    val f = lib.files.value.firstOrNull { it.error == null && it.sha256.isNotEmpty() && it.sha256 == e.sha256 }
+    return if (f != null) lib.details(f.sha256).fantasy.virtual else e.virtual
 }
 
 /** Get firmware: the list, and a firmware's page (iOS GetFirmwarePage, CatalogDetailPage) */
@@ -187,7 +200,7 @@ private fun GetFirmwarePages(a: AppUi, back: () -> Unit) {
                         .padding(start = 16.dp, end = 10.dp, top = 10.dp, bottom = 10.dp).testTag("catalog-${it.id}"),
                         verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(it.displayName + if (it.beta) "  BETA" else "", style = ui(15, 600), maxLines = 1)
+                            BadgeLine(fantasy(a, it)) { Text(it.displayName + if (it.beta) "  BETA" else "", style = ui(15, 600), maxLines = 1) }
                             if (it.summary.isNotEmpty()) Text(it.summary, style = ui(12, 500, Palette.sheetMuted2), maxLines = 2)
                             Text(listOf(it.author, it.category, size(it.size)).filter { s -> s.isNotEmpty() && s != "–" }.joinToString(" · "),
                                  style = ui(12, 400, Palette.sheetMuted), maxLines = 1)
@@ -266,6 +279,7 @@ private fun CatalogDetail(a: AppUi, store: FirmwareStore, e: AvailableFirmware, 
     val uri = LocalUriHandler.current
     var asking by remember(e.id) { mutableStateOf(false) }
     SheetPage(e.displayName, "Get firmware", back = back) {
+        if (fantasy(a, e)) Box(Modifier.padding(bottom = 6.dp)) { FantasyBadge() }
         Text(listOf(e.version, if (e.beta) "BETA" else "", if (e.author.isNotEmpty()) "· ${e.author}" else "").filter { it.isNotEmpty() }.joinToString(" "),
              style = ui(15, 600, Palette.sheetMuted2))
         val text = e.about.ifEmpty { e.summary }
@@ -435,6 +449,7 @@ class AppDataPages(private val a: AppUi, private val ctx: Context) : DataPagesMo
 
     /** the Your data folder picked (Settings) */
     fun folderPicked(ok: Boolean) {
+        com.quixotic7.remotefm1.folder.RemoteFolderHost.refresh(ctx)     // (a Fantasy CFW's RemoteFM1 folder is in it)
         note = if (ok) DataFolder.backupNote("Your folder") else "That folder can't be used."
     }
 

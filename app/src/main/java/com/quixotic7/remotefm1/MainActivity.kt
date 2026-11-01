@@ -82,6 +82,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         model.mirrorSync()
+        com.quixotic7.remotefm1.folder.RemoteFolderHost.noteChanged()   // (files may have come into the RemoteFM1 folder)
     }
 
     // the app goes to the background: the flash saved (iOS's didEnterBackground); the sound and link go on

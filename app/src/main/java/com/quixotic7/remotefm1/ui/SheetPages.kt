@@ -221,6 +221,8 @@ private fun FirmwarePage(a: AppUi) {
             SheetRow("Restart the firmware", divider = false, chevron = false, tag = "row-restart") { m.restartFirmware() }
         }
         Box(Modifier.padding(top = 12.dp)) { Column { DataRows(a, from = SheetPageId.FIRMWARE) } }
+        // (a Fantasy CFW that reads files) its RemoteFM1 folder
+        c?.let { a.firmware.fantasy(it) }?.takeIf { it.virtual && it.usesFolder }?.let { FantasyFolderSection(a, it) }
         SheetSectionTitle("Built in")
         FirmwareTileGrid(a, builtIn)
         SheetSectionTitle("Imported")
@@ -260,6 +262,7 @@ private fun FirmwareInfoCard(a: AppUi, e: FirmwareEntry) {
                                                   fontWeight = FontWeight.Bold, fontSize = 19.sp, color = Palette.sheetText), maxLines = 2)
                 Text(listOf(info.version, if (a.running) "running" else "").filter { it.isNotEmpty() }.joinToString(" · "),
                      style = ui(13, 600, Palette.sheetAccent))
+                if (info.fantasy) FantasyBadge(Modifier.padding(vertical = 2.dp))
                 if (info.author.isNotEmpty()) Text("by ${info.author}", style = ui(13, 500, Palette.sheetMuted2), maxLines = 2)
                 if (info.tag.isNotEmpty()) Text(info.tag, Modifier.padding(top = 3.dp), style = ui(13, 600), maxLines = 3)
             }
@@ -330,6 +333,7 @@ private fun AboutPage(a: AppUi) {
         if (c == null) return@SheetPage
         val (rows, text) = a.firmware.about(c)
         SheetSectionTitle("${c.name} ${c.version}", top = 12)
+        if (a.firmware.fantasy(c)?.virtual == true) Box(Modifier.padding(bottom = 10.dp)) { FantasyBadge() }
         Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Palette.sheetSurface).padding(16.dp),
                verticalArrangement = Arrangement.spacedBy(3.dp)) {
             for ((k, v) in rows) Row {
