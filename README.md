@@ -15,8 +15,12 @@ app going to the background, Pattern mode, a core switch, Restart, a firmware's 
 Restart firmware (a power cycle from the flash); the audio output picked from Android's outputs (Oboe device id), a
 note when the sound goes to a USB sound card, the stream reopened after a disconnect or when the picked output goes.
 No faceplate yet (A3). After the first real FM-1 test (2026-11-01, see "Known issues"): the sound never goes to a USB
-output unless picked, and the link reopens a link whose write failed or whose unit went quiet; the second-round
-device test is [docs/A1-DEVICE-TEST.md](docs/A1-DEVICE-TEST.md).
+output unless picked, and the link reopens a link whose write failed or whose unit went quiet. After the second
+(2026-11-01): the screen and buttons worked and the sound on the tablet worked, but the sound to the FM-1's USB audio
+played nothing, the FM-1 dropped off USB, and a stream's close then froze the app (killed by Android); so every audio
+stream call now runs on an audio-control thread that never makes the UI wait and goes on past a stuck call, and USB
+outputs are offered only with Settings › Sound through USB devices (experimental). The third-round device test is
+[docs/A1-DEVICE-TEST.md](docs/A1-DEVICE-TEST.md).
 
 ## Layout
 
@@ -30,12 +34,14 @@ device test is [docs/A1-DEVICE-TEST.md](docs/A1-DEVICE-TEST.md).
     sound, reconnect, the flash's save points, the audio output and its reopening); `FlashFile.kt`: safe flash
     writes, `.prev`, the sidecar (pure Kotlin); `CoreFlash.kt`: a core's flash file read at boot, the clock's copies
     written, save now / stopped, the power cycle; `AudioOutput.kt`: Android's outputs (`AudioOutputs`), the route
-    rules (`AudioRoute`, pure); `PlaybackService.kt`: the foreground service; `MainActivity.kt`: the main,
+    rules (`AudioRoute`, pure); `AudioControl.kt`: the audio-control thread (pure Kotlin: the wants, the stream
+    calls on workers with time limits, the state); `PlaybackService.kt`: the foreground service; `MainActivity.kt`: the main,
     Diagnostics and Bluetooth pages; `Levels.kt`: audio levels.
   - `src/debug/`: `FakeFm1Service`, a virtual MIDI device "RemoteFM1 Fake FM-1" with the fake unit behind it (debug
     builds only; disabled unless a test or the `virtual` launch extra enables it).
   - `src/test`: JVM tests (`Fm1CandidateTest`, `ReconnectPolicyTest`, `LinkModelsTest`, `LevelsTest`,
-    `FlashFileTest`, `AudioRouteTest`); `src/androidTest`: `CoreTest` (A0), `CoresTest` (A2) and `LinkTest` (A1).
+    `FlashFileTest`, `AudioRouteTest`, `AudioControlTest`); `src/androidTest`: `CoreTest` (A0), `CoresTest` (A2),
+    `AudioControlDeviceTest` (the audio-control thread on Oboe) and `LinkTest` (A1).
 - `native/`: the app's native library `librfmcore.so` (`native/CMakeLists.txt`, built by Gradle's
   `externalNativeBuild`): libremotefm1 compiled in place from `vendor/RemoteFM1/host/src` (portable C99), and
   `native/rfmcore/`: the engine copied from RemoteFM1IOS (each file's header says from which commit and what
@@ -189,12 +195,31 @@ v0.6.2's engine; the seven tests pass either way.)
 
 The Oboe stream is always opened on a device id, never on Android's default: once the FM-1 is plugged in, Android
 makes its USB audio the default output. The picker (main page, Audio output) offers Automatic (wired headphones,
-then Bluetooth, then other outputs, then the speaker; never USB), the speaker, headphones, Bluetooth and, when one is
-listed, the USB output. The pick is saved as a kind, except USB, which lasts until the app quits. A USB output is
-opened shared, on Android's mixer (performance mode None) with MMAP off; any other stream that Android routes to a
-USB output anyway is closed before it starts (`RFMAudio` logs where each stream really went: asked device, got
+then Bluetooth, then other outputs, then the speaker; never USB), the speaker, headphones, Bluetooth and, only with
+**Settings › Sound through USB devices (experimental)** on (off by default; remembered), a listed USB output. The
+pick is saved as a kind, except USB, which lasts until the app quits. A USB output is opened shared, on Android's
+mixer (performance mode None) with MMAP off; if it plays no frames within 2 s it is stopped, the pick goes back to
+Automatic and the app says "Sound through USB didn't start on this tablet". Any other stream that Android routes to
+a USB output anyway is closed before it starts (`RFMAudio` logs where each stream really went: asked device, got
 device, API, sharing, performance mode, MMAP). Plugging the FM-1 in or out never moves the sound to or from it; when
 the picked output goes, the sound goes to Automatic's choice.
+
+**The audio-control thread** (`AudioControl.kt`, `RFMOboe.h`). The main thread never calls Oboe: it says what it
+wants (sound on or off, the outputs to try in order: the pick, then Automatic's) and returns; only the latest want
+counts (sound on/off/on before the thread looks is one open, or none if the stream still plays). The thread
+`RFMAudioCtl` opens, starts, watches (every 100 ms: frames moving, a disconnect) and closes the streams, each
+blocking call on a worker thread of its own with a time limit: a close not back in 2 s is abandoned (the stream was
+silenced first; its worker finishes it whenever Android lets it, then frees it) and the next stream opens anyway; an
+open not back in 5 s shows "The tablet's audio system is busy", is waited for up to 20 s (or until the sound isn't
+wanted on that output), then abandoned (what it opens late is closed); at most two such opens are pending before a
+new one is tried. Failures retry after 0.5, 1, 2, 4 and 8 s, then the line under the picker says "Sound failed: …"
+until the sound is turned on again or the outputs change. Natively, several streams may exist at once but only the
+active one renders the engine (each callback checks its stream's generation and plays silence otherwise; two
+callbacks never render at once), a close never touches the engine, and the status the main page reads at 15 Hz
+never blocks (what open recorded, the callback's counters, the getters refreshed by the audio thread). The engine's
+clock changes (the main thread's and the audio thread's claims: TIMER to AUDIO when a stream plays, back when it
+goes) are serialised in `rfm_jni.cpp`. Diagnostics › Core shows the thread's state, opens, closes, stuck closes and
+opens, stalls and how many streams exist.
 
 ## Known issues
 
@@ -207,6 +232,15 @@ the picked output goes, the sound goes to Automatic's choice.
   (with a warning on the row), and then the careful way (shared, no MMAP); whether that path is safe on this tablet
   is not known. Other Samsung/Qualcomm devices may do the same. The FM-1's USB audio is not needed for anything else:
   pick the tablet's speaker, headphones or Bluetooth.
+- **The careful path doesn't work there either, and it makes the FM-1 drop off USB.** In the second FM-1 test
+  (2026-11-01, build 07809bd) the FM-1's USB output picked by hand opened shared, performance None, MMAP 0 (AAudio,
+  device 117, burst 1922), but the Qualcomm HAL could not play it: about 400 `AGM session_connect_aif ... graph open
+  failed` / `PAL SessionAlsaPcm: start: pcm open not ready` / `pal_stream_start failed -22` lines, no sound. On the
+  second try the FM-1 dropped off USB 3 s after the start (its USB output removed and added again 3 s later), as it
+  did in round one right after a USB audio start. Then switching to the speaker blocked the app's main thread in the
+  stream's close until Android killed it (ANR), and after the relaunch the audio server was still busy (an open took
+  8 s; more ANRs when the sound was toggled). Since then: no stream call on the main thread (the audio-control
+  thread), and USB outputs are not offered unless **Settings › Sound through USB devices (experimental)** is on.
 
 ## iOS → Android file map
 

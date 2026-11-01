@@ -5,7 +5,8 @@
 // rate). Android has no system route picker, so the app lists AudioManager's outputs and opens the Oboe stream on
 // the one picked, always by its device id: Android's own default would be the FM-1's USB audio as soon as it is
 // plugged in, and sound to it over the Qualcomm USB offload restarted a Galaxy Tab A9+ (README "Known issues"). So:
-// the sound never goes to a USB output unless the user picked it (then shared, no MMAP); the pick is kept as a kind
+// USB outputs are offered only with Settings › Sound through USB devices (experimental) on, and the sound never goes
+// to one unless the user picked it (then shared, no MMAP); the pick is kept as a kind
 // (speaker, headphones, Bluetooth; USB only until the app quits); plugging the FM-1 in or out never moves the sound
 // to or from it; when the picked output goes, the sound goes to the speaker (or headphones, Bluetooth).
 package com.quixotic7.remotefm1
@@ -69,8 +70,9 @@ object AudioRoute {
     const val USB = "usb"
     const val OTHER = "other"
 
-    /** the warning on the USB row (the owner's Galaxy Tab A9+ restarted) */
-    const val USB_WARNING = "Some Samsung tablets restart when sound goes to the FM-1 over USB."
+    /** the warning with the experimental setting and the USB row (the owner's Galaxy Tab A9+, both FM-1 tests) */
+    const val USB_WARNING = "On a Galaxy Tab A9+ sound through the FM-1's USB audio once restarted the tablet, and " +
+        "later played nothing and made the FM-1 drop off USB. Use the speaker, headphones or Bluetooth."
 
     /** the picks the picker offers: Automatic, then each kind Android lists now (USB last) */
     fun kinds(outs: List<AudioOut>): List<String> =

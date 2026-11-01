@@ -39,6 +39,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -63,13 +64,14 @@ import androidx.compose.ui.unit.sp
  * A1's screens (the faceplate is A3's): the main page (sound source, mode, the core, the sound, the screen being
  * sent), Diagnostics (RemoteFM1IOS App/DiagnosticsScreen.swift's cards: Unit, Link, Panel, Core, and the MIDI devices
  * Android reports) and the Bluetooth page (scan, connect, the remembered unit). Launch extras (adb `am start --ez`):
- * fake, fakeble, virtual (debug), source fm1|tablet, mode pattern|core, core <id>, sound, page diagnostics|bluetooth.
+ * fake, fakeble, virtual (debug), source fm1|tablet, mode pattern|core, core <id>, sound, output <kind>,
+ * page diagnostics|bluetooth|settings. Settings: sound through USB devices (experimental, off by default).
  */
 class MainActivity : ComponentActivity() {
     private lateinit var model: AppModel
     private var page by mutableStateOf(Page.MAIN)
 
-    enum class Page { MAIN, DIAGNOSTICS, BLUETOOTH }
+    enum class Page { MAIN, DIAGNOSTICS, BLUETOOTH, SETTINGS }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -97,6 +99,7 @@ class MainActivity : ComponentActivity() {
         when (i?.getStringExtra("page")) {
             "diagnostics" -> page = Page.DIAGNOSTICS
             "bluetooth" -> page = Page.BLUETOOTH
+            "settings" -> page = Page.SETTINGS
         }
         if (i?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
             val d: UsbDevice? = if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
@@ -120,6 +123,7 @@ class MainActivity : ComponentActivity() {
                 Page.MAIN -> MainPage()
                 Page.DIAGNOSTICS -> DiagnosticsPage()
                 Page.BLUETOOTH -> BluetoothPage()
+                Page.SETTINGS -> SettingsPage()
             }
         }
     }
@@ -165,13 +169,15 @@ class MainActivity : ComponentActivity() {
             }
             Label("Audio output")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AudioRoute.kinds(m.outputList).forEach { k ->
-                    FilterChip(m.outputPick == k, { m.chooseOutput(k) }, { Text(AudioRoute.kindTitle(m.outputList, k)) })
+                val outs = m.pickable
+                AudioRoute.kinds(outs).forEach { k ->
+                    FilterChip(m.outputPick == k, { m.chooseOutput(k) }, { Text(AudioRoute.kindTitle(outs, k)) })
                 }
             }
-            if (m.outputList.any { it.usb }) Text(AudioRoute.USB_WARNING, fontSize = 12.sp, color = Theme.accent)
+            if (m.usbAudio && m.outputList.any { it.usb }) Text(AudioRoute.USB_WARNING, fontSize = 12.sp, color = Theme.accent)
             if (m.mode == Mode.CORE && m.soundOn) {
-                Text("Playing on " + AudioRoute.name(m.outputList, m.playingOn), fontSize = 12.sp, color = Theme.dim)
+                val st = m.audioState
+                Text(st.line, fontSize = 12.sp, color = if (st is AudioState.Failed || st is AudioState.Busy) Theme.accent else Theme.dim)
                 AudioRoute.hint(m.outputList, m.playingOn)?.let { Text(it, fontSize = 12.sp, color = Theme.teal) }
             }
             if (m.message.isNotEmpty()) Text(m.message, color = Theme.accent, fontSize = 13.sp)
@@ -183,6 +189,7 @@ class MainActivity : ComponentActivity() {
                     if (m.mode == Mode.CORE) Text(m.coreName + if (m.soundOn) " · " + AudioRoute.name(m.outputList, m.playingOn) else "", fontSize = 13.sp)
                     Button({ page = Page.BLUETOOTH }) { Text("Bluetooth…") }
                     OutlinedButton({ page = Page.DIAGNOSTICS }) { Text("Diagnostics") }
+                    OutlinedButton({ page = Page.SETTINGS }) { Text("Settings") }
                 }
             }
         }
@@ -324,7 +331,10 @@ class MainActivity : ComponentActivity() {
                         "latency ${a.optDouble("latency_ms").let { if (it.isNaN() || it < 0) "?" else "%.1f ms".format(it) }}"
                 else "–",
                 "xruns" to "${a?.optInt("xruns") ?: 0} (stream), underruns ${s.optInt("underruns")} (engine, ${s.optInt("underrun_frames")} frames)",
-                "route" to "${model.routeChanges} output changes, ${model.audioRestarts} reopens, ${a?.optInt("disconnects") ?: 0} disconnects",
+                "route" to "${model.routeChanges} output changes, ${model.audio.opens} opens, ${model.audio.closes} closes, " +
+                    "${a?.optInt("disconnects") ?: 0} disconnects",
+                "audio thread" to "${model.audioState}; stuck closes ${model.audio.abandonedCloses}, stuck opens " +
+                    "${model.audio.abandonedOpens}, stalls ${model.audio.stalls}, streams ${a?.optInt("streams") ?: 0}",
                 "latency" to "${s.optInt("latency_frames")} frames (ring ${s.optInt("ring_target")}" +
                     (s.optDouble("rate").takeIf { it > 0 }?.let { ", %.1f ms".format(s.optInt("latency_frames") * 1000.0 / it) } ?: "") + ")",
                 "flash" to "${model.flash.dir.name}/${model.flash.bootedId ?: "–"}.bin, ${s.optInt("flash_size") / 1024} KB, " +
@@ -413,6 +423,28 @@ class MainActivity : ComponentActivity() {
             }
             MidiCard()
             Text("$tick", color = Color.Transparent, fontSize = 1.sp)
+        }
+    }
+
+    // ---------------------------------------------------------------- Settings
+    @Composable
+    private fun SettingsPage() {
+        val m = model
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Settings", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                Button({ page = Page.MAIN }) { Text("Done") }
+            }
+            Card("Audio") {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Sound through USB devices (experimental)")
+                        Text(AudioRoute.USB_WARNING, fontSize = 12.sp, color = Theme.accent)
+                    }
+                    Switch(m.usbAudio, { m.useUsbAudio(it) })
+                }
+            }
         }
     }
 

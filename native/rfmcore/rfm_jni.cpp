@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -23,7 +24,15 @@ namespace {
 struct Host {
     rfme_t *e = nullptr;
     rfmo_t *out = nullptr;
+    // the engine's clock has one owner at a time: the calls that set it, or stop it and give it back (load, boot,
+    // unload, power cycle, the final flash, offline renders), come from the main thread and the audio-control thread
+    // (AudioControl.kt's clock claims), so they are serialised here. Held only for the engine call, never through an
+    // Oboe call (which may block in Android).
+    std::mutex ctl;
+    rfmo_stream_t *direct = nullptr;    // nativeStartAudio's stream (tests' synchronous path), under ctl
 };
+
+using Lock = std::lock_guard<std::mutex>;
 
 Host *host(jlong h) { return reinterpret_cast<Host *>(h); }
 
@@ -145,6 +154,13 @@ JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeDestroy(JNIE
     Host *h = host(p);
     if (!h)
         return;
+    {
+        Lock l(h->ctl);
+        if (h->direct) {
+            rfmo_close(h->direct);
+            h->direct = nullptr;
+        }
+    }
     rfmo_free(h->out);
     rfme_free(h->e);
     delete h;
@@ -153,6 +169,7 @@ JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeDestroy(JNIE
 // "" ok, else the error
 JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeLoad(JNIEnv *env, jclass, jlong p, jstring id)
 {
+    Lock l(host(p)->ctl);
     char err[512] = {};
     const int ok = rfme_load(host(p)->e, jstr(env, id).c_str(), err, sizeof err);
     return utf(env, ok ? "" : (err[0] ? err : "load failed"));
@@ -160,6 +177,7 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeLoad(JNIE
 
 JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeBoot(JNIEnv *env, jclass, jlong p, jbyteArray flash)
 {
+    Lock l(host(p)->ctl);
     std::vector<uint8_t> img;
     if (flash) {
         img.resize((size_t)env->GetArrayLength(flash));
@@ -177,6 +195,7 @@ JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeAttach(JNIEn
 // tests: the echo core (its MIDI in back out, silence)
 JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTestLoadEcho(JNIEnv *, jclass, jlong p)
 {
+    Lock l(host(p)->ctl);
     return rfme_test_load_echo(host(p)->e) ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -230,6 +249,7 @@ JNIEXPORT jintArray JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeRenderB
 
 JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetClock(JNIEnv *, jclass, jlong p, jint owner)
 {
+    Lock l(host(p)->ctl);
     rfme_set_clock(host(p)->e, owner);
 }
 
@@ -240,30 +260,131 @@ JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeKey(JNIE
     return rfme_event_vel(host(p)->e, RFMC_EV_KEY, (uint8_t)key, down ? 1 : 0, (uint8_t)vel) ? JNI_TRUE : JNI_FALSE;
 }
 
+static int readIds(JNIEnv *env, jintArray a, int32_t *ids, int max)
+{
+    if (!a)
+        return 0;
+    int nf = env->GetArrayLength(a);
+    if (nf > max)
+        nf = max;
+    env->GetIntArrayRegion(a, 0, nf, reinterpret_cast<jint *>(ids));
+    return nf;
+}
+
+// (tests, one thread) the synchronous path: a stream opened, started, made active, the clock given to it
 JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStartAudio(JNIEnv *env, jclass, jlong p, jint device,
                                                                                   jboolean usbSafe, jintArray forbidden)
 {
+    Host *h = host(p);
+    if (h->direct)
+        return utf(env, "already playing");
     char err[160] = {};
     int32_t ids[16] = {};
-    int nf = 0;
-    if (forbidden) {
-        nf = env->GetArrayLength(forbidden);
-        if (nf > 16)
-            nf = 16;
-        env->GetIntArrayRegion(forbidden, 0, nf, reinterpret_cast<jint *>(ids));
+    const int nf = readIds(env, forbidden, ids, 16);
+    rfmo_stream_t *s = rfmo_open(h->out, device, usbSafe ? 1 : 0, ids, nf, err, sizeof err);
+    if (!s)
+        return utf(env, err[0] ? err : "open failed");
+    if (!rfmo_start(s, err, sizeof err)) {
+        rfmo_close(s);
+        return utf(env, err[0] ? err : "start failed");
     }
-    const int ok = rfmo_start(host(p)->out, device, usbSafe ? 1 : 0, ids, nf, err, sizeof err);
-    return utf(env, ok ? "" : (err[0] ? err : "start failed"));
+    rfmo_activate(s);
+    Lock l(h->ctl);
+    h->direct = s;
+    rfme_set_clock(h->e, RFME_CLOCK_AUDIO);
+    return utf(env, "");
 }
 
 JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStopAudio(JNIEnv *, jclass, jlong p, jint clockAfter)
 {
-    rfmo_stop(host(p)->out, clockAfter);
+    Host *h = host(p);
+    rfmo_stream_t *s;
+    {
+        Lock l(h->ctl);
+        s = h->direct;
+        h->direct = nullptr;
+        if (rfme_clock(h->e) == RFME_CLOCK_AUDIO)
+            rfme_set_clock(h->e, clockAfter);
+    }
+    if (s)
+        rfmo_close(s);
+}
+
+// ---- the audio-control thread's streams (AudioControl.kt; each call on a worker of its, any may block in Android)
+// out[0] = the stream; "" or the error
+JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStreamOpen(JNIEnv *env, jclass, jlong p, jint device,
+                                                                                  jboolean usbSafe, jintArray forbidden,
+                                                                                  jlongArray out)
+{
+    char err[160] = {};
+    int32_t ids[16] = {};
+    const int nf = readIds(env, forbidden, ids, 16);
+    rfmo_stream_t *s = rfmo_open(host(p)->out, device, usbSafe ? 1 : 0, ids, nf, err, sizeof err);
+    const jlong v = reinterpret_cast<jlong>(s);
+    env->SetLongArrayRegion(out, 0, 1, &v);
+    return utf(env, s ? "" : (err[0] ? err : "open failed"));
+}
+
+JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStreamStart(JNIEnv *env, jclass, jlong s)
+{
+    char err[160] = {};
+    return utf(env, rfmo_start(reinterpret_cast<rfmo_stream_t *>(s), err, sizeof err) ? "" : (err[0] ? err : "start failed"));
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStreamActivate(JNIEnv *, jclass, jlong s)
+{
+    rfmo_activate(reinterpret_cast<rfmo_stream_t *>(s));
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStreamDeactivate(JNIEnv *, jclass, jlong s)
+{
+    rfmo_deactivate(reinterpret_cast<rfmo_stream_t *>(s));
+}
+
+// (static: never touches the engine, which may be gone when an abandoned close returns)
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStreamClose(JNIEnv *, jclass, jlong s)
+{
+    rfmo_close(reinterpret_cast<rfmo_stream_t *>(s));
+}
+
+// out = [frames, callbacks, dead, device, usb_safe, mmap, api, sharing, performance, rate, burst]
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStreamInfo(JNIEnv *env, jclass, jlong s, jboolean refresh,
+                                                                               jlongArray out)
+{
+    rfmo_stream_info_t i;
+    rfmo_stream_info(reinterpret_cast<rfmo_stream_t *>(s), refresh ? 1 : 0, &i);
+    const jlong v[11] = {(jlong)i.frames, i.callbacks, i.dead, i.device_id, i.usb_safe, i.mmap, i.api, i.sharing,
+                         i.performance, i.rate, i.frames_per_burst};
+    env->SetLongArrayRegion(out, 0, 11, v);
+}
+
+// the clock moved from `from` to `to` only if it is `from` now (the audio thread's claims: TIMER -> AUDIO when its
+// stream plays, AUDIO -> TIMER when it goes; a clock the main thread stopped meanwhile stays stopped)
+JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeClockSwap(JNIEnv *, jclass, jlong p, jint from, jint to)
+{
+    Host *h = host(p);
+    Lock l(h->ctl);
+    if (rfme_clock(h->e) != from)
+        return JNI_FALSE;
+    rfme_set_clock(h->e, to);
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTestAudioHang(JNIEnv *, jclass, jlong p, jint closeMs, jint openMs)
+{
+    rfmo_test_hang(host(p)->out, closeMs, openMs);
 }
 
 JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStatus(JNIEnv *env, jclass, jlong p)
 {
     Host *h = host(p);
+    {
+        Lock l(h->ctl);                 // (the tests' synchronous stream: its getters refreshed on their thread)
+        if (h->direct) {
+            rfmo_stream_info_t i;
+            rfmo_stream_info(h->direct, 1, &i);
+        }
+    }
     rfme_status_t s;
     rfme_status(h->e, &s);
     rfmo_status_t o;
@@ -335,6 +456,7 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStatus(JN
     a.num("peak", o.peak);
     a.num("last_error", o.last_error);
     a.str("error", o.error);
+    a.num("streams", o.streams);
     j.raw("audio", a.done());
     return utf(env, j.done());
 }
@@ -352,6 +474,7 @@ JNIEXPORT jfloatArray JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeRende
                                                                                           jint frames, jdouble rate,
                                                                                           jint buffer)
 {
+    Lock l(host(p)->ctl);
     Host *h = host(p);
     rfmo_status_t o;
     rfmo_status(h->out, &o);
@@ -417,6 +540,7 @@ JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeRequestFlash
 // the clock stopped, flash_sync, the image now into out, the clock given back
 JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeFinalFlash(JNIEnv *env, jclass, jlong p, jbyteArray out)
 {
+    Lock l(host(p)->ctl);
     const jsize n = out ? env->GetArrayLength(out) : 0;
     std::vector<uint8_t> buf((size_t)n);
     if (!n || !rfme_final_flash(host(p)->e, buf.data(), (uint32_t)n))
@@ -428,6 +552,7 @@ JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeFinalFla
 // "" ok, else the error
 JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativePowerCycle(JNIEnv *env, jclass, jlong p)
 {
+    Lock l(host(p)->ctl);
     char err[256] = {};
     const int ok = rfme_power_cycle(host(p)->e, err, sizeof err);
     return utf(env, ok ? "" : (err[0] ? err : "power cycle failed"));
@@ -435,6 +560,7 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativePowerCycl
 
 JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeUnload(JNIEnv *, jclass, jlong p)
 {
+    Lock l(host(p)->ctl);
     rfme_unload(host(p)->e);
 }
 
@@ -442,6 +568,7 @@ JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeUnload(JNIEn
 JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeRunMs(JNIEnv *env, jclass, jlong p, jint ms,
                                                                            jdoubleArray out)
 {
+    Lock l(host(p)->ctl);
     rfme_audio_t a{};
     rfme_run_ms(host(p)->e, (uint32_t)ms, &a);
     if (out && env->GetArrayLength(out) >= 4) {
@@ -472,6 +599,7 @@ JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeMatrixEncode
 JNIEXPORT jlong JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeParam(JNIEnv *env, jclass, jlong p, jstring name,
                                                                             jboolean anyClock)
 {
+    Lock l(host(p)->ctl);
     int32_t v = 0;
     const std::string n = jstr(env, name);
     const int ok = anyClock ? rfme_param_read(host(p)->e, n.c_str(), &v) : rfme_param_get(host(p)->e, n.c_str(), &v);

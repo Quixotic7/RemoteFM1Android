@@ -16,6 +16,16 @@ the row; never saved), every stream opened on an explicit device; a link whose w
 (A1 left it dead), a link silent for 6 s+ is reopened; logs and Diagnostics for every port, drop and session; the
 Sound source chips say what they do. JVM 36 tests, LinkTest 18 (emulator and tablet). Second round:
 docs/A1-DEVICE-TEST.md. A2's "heard through the FM-1's USB audio" is now optional there (README, "Known issues").
+Second real FM-1 test (2026-11-01, build 07809bd): the FM-1's screen and buttons worked over USB and ChoralRoot played
+on the tablet's speaker; the FM-1's USB audio (picked by hand, shared, no MMAP) played nothing (Qualcomm HAL:
+`graph open failed`, `pal_stream_start failed -22`), the FM-1 dropped off USB right after, and switching back to the
+speaker blocked the main thread in the stream's close: ANR, and after the relaunch the audio server was still busy
+(more ANRs). No Bluetooth was tried. Fixed: the audio-control thread (`AudioControl.kt`: nothing on the main thread
+waits for Oboe, wants coalesce, a stuck close is abandoned after 2 s, a slow open shows "busy" and is retried, a
+silent USB stream falls back to Automatic; natively several streams may exist, only the active one renders) and USB
+outputs only with Settings › Sound through USB devices (experimental). A2's "heard through the FM-1's USB audio" is
+dropped for this tablet. Third round: docs/A1-DEVICE-TEST.md (Bluetooth, sound spam on the speaker, 5 minutes over
+USB MIDI; no USB audio).
 
 Owner's answers (2026-11-01): install the Android tooling (yes); test device: the owner's Samsung Galaxy Tab A9+
 (SM-X210, Android 16 / API 36, arm64, 1200x1920; adb serial R95Y906QALT; Samsung's Auto Blocker must be off for adb and
@@ -128,7 +138,7 @@ headless emulator with the fake unit, and on a real Android device with the FM-1
 | --- | --- | --- |
 | A0 | Toolchain and skeleton: the SDK, NDK and emulator installed; Gradle project (`app`, `native` with CMake); RemoteFM1, FM1VST and the firmware repos as submodules at the iOS app's pins; libremotefm1 + the engine + one core built for arm64; a JNI smoke test | the APK builds from a clean checkout; on the headless emulator ChoralRoot boots on the fake unit and its first audio frames aren't silent |
 | A1 | The FM-1 link: AMidi back end, USB MIDI discovery (no USB permission is needed for MIDI; a USB_DEVICE_ATTACHED filter opens the app), the BLE scan page, HELLO, session, M1's test pattern, Core mode on the link, the Diagnostics page (HELLO_R fields, link stats), the foreground service | on a real phone: the pattern moves on the FM-1 over USB and Bluetooth, its keys light their LEDs. Fake unit: done (`scripts/emu_linktest.sh`); real FM-1: docs/A1-DEVICE-TEST.md |
-| A2 | Cores and sound: every core as `.so`, the engine with render-ahead on Oboe, the flash files (safe writes, `.prev`), the foreground service, the audio output picker | ChoralRoot plays from the FM-1, heard on the phone and through the FM-1's USB audio; a power cycle keeps its settings; underruns counted and 0 on the test phone |
+| A2 | Cores and sound: every core as `.so`, the engine with render-ahead on Oboe, the flash files (safe writes, `.prev`), the foreground service, the audio output picker, the audio-control thread | ChoralRoot plays from the FM-1, heard on the phone (the FM-1's USB audio: experimental, off by default; it fails on the Tab A9+); a power cycle keeps its settings; underruns counted and 0 on the test phone; no ANR from sound on/off or output switches |
 | A3 | The faceplate in Compose: Full (phone portrait with the scrolling keybed, landscape, tablet), Controls, Screen; the themes and editor; display alone; screen protector; the pull-down sheet with its pages; button names; touch keys without an FM-1 ("This phone") | emulator screenshots match iOS's `sim_shots.sh` set page for page; playable with no FM-1 |
 | A4 | Firmware: the library, `.rfm1` (wasm3), Add firmware / Open with, Get firmware (both feeds, updates, badge, offline cache), delete, thumbnails, the Firmware card (description, View source) | the Melodee and Felucca `.rfm1` from the catalog install and play next to the built-in cores |
 | A5 | Data safety (iOS section 18): safety copies and history, Reset, named states, `.rfm1state` share/import, the States mirror and Back up everything / Restore (in the folder the user picks), version questions, the wiped-memory card | a state saved on the iPhone app loads on Android and back; the iOS tests' cases pass in Kotlin |

@@ -80,8 +80,7 @@ class AudioRouteTest {
         assertEquals("nothing", R.name(outs, 0))
         assertEquals("device 9", R.name(outs, 9))
         assertNull(R.hint(outs, 2))
-        assertEquals("The sound goes out of the FM-1's USB audio. Some Samsung tablets restart when sound goes to the FM-1 over USB.",
-                     R.hint(outs, 31))
+        assertEquals("The sound goes out of the FM-1's USB audio. ${R.USB_WARNING}", R.hint(outs, 31))
     }
 
     @Test fun defaultCoreFallsBack() {

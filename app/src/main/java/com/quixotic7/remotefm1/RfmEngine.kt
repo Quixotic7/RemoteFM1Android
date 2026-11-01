@@ -7,7 +7,8 @@ import org.json.JSONObject
 /**
  * One FM-1 core engine (native/rfmcore: RFMEngine with its render-ahead core thread, the core loader, the Oboe
  * output), on the FM-1 [link] (which must outlive it) or headless (null). Control calls are for one thread (the main
- * thread or a test's).
+ * thread or a test's); the clock's changes are serialised natively with the audio-control thread's ([streams]).
+ * Close the engine only after its AudioControl has shut down.
  */
 class RfmEngine(link: RfmLink? = null) : AutoCloseable {
     private var handle: Long = nativeCreate(link?.handle ?: 0L)
@@ -53,7 +54,7 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
     fun key(key: Int, down: Boolean, vel: Int = 0): Boolean = nativeKey(handle, key, down, vel)
 
     /**
-     * Starts the Oboe stream on [deviceId] (0: Android's default, which the app never asks for: with an FM-1 on USB
+     * (Tests' synchronous path; the app uses [streams] on its audio-control thread.) Starts the Oboe stream on [deviceId] (0: Android's default, which the app never asks for: with an FM-1 on USB
      * that is the FM-1). [usbSafe]: a USB output the user picked (shared, no MMAP). [forbidden]: outputs it must not
      * end up on (the USB ones not picked; closed before a sample plays). Null on success, else the error.
      */
@@ -61,6 +62,36 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         nativeStartAudio(handle, deviceId, usbSafe, forbidden).ifEmpty { null }
 
     fun stopAudio(clockAfter: Int = CLOCK_TIMER) = nativeStopAudio(handle, clockAfter)
+
+    // ---- the audio-control thread's streams (AudioControl.kt: each call may block in Android, never the main thread)
+    /** The back end AudioControl drives: this engine's Oboe streams and its clock. */
+    val streams: StreamBackend = object : StreamBackend {
+        override fun open(out: AudioOut, forbidden: IntArray): StreamBackend.Opened {
+            val h = LongArray(1)
+            val err = nativeStreamOpen(handle, out.id, out.usb, forbidden, h).ifEmpty { null }
+            return StreamBackend.Opened(h[0], err)
+        }
+        override fun start(handle: Long): String? = nativeStreamStart(handle).ifEmpty { null }
+        override fun activate(handle: Long) = nativeStreamActivate(handle)
+        override fun deactivate(handle: Long) = nativeStreamDeactivate(handle)
+        override fun close(handle: Long) = nativeStreamClose(handle)
+        override fun info(handle: Long, refresh: Boolean): StreamBackend.Info {
+            val v = LongArray(11)
+            nativeStreamInfo(handle, refresh, v)
+            val api = if (v[6] == 2L) "AAudio" else if (v[6] == 1L) "OpenSL ES" else "?"
+            val text = "$api ${if (v[7] == 0L) "exclusive" else "shared"}, performance ${v[8]}, MMAP ${v[5]}, " +
+                "${v[9]} Hz, burst ${v[10]}" + if (v[4] != 0L) ", USB careful mode" else ""
+            return StreamBackend.Info(v[0], v[2] != 0L, v[3].toInt(), text)
+        }
+        override fun claimClock(): Boolean = clockSwap(CLOCK_TIMER, CLOCK_AUDIO)
+        override fun releaseClock() { clockSwap(CLOCK_AUDIO, CLOCK_TIMER) }
+    }
+
+    /** The clock to [to] only if it is [from] now (serialised with every other clock change); true: it moved. */
+    fun clockSwap(from: Int, to: Int): Boolean = nativeClockSwap(handle, from, to)
+
+    /** Tests: every stream close blocks [closeMs] inside, every open [openMs] before it opens (0 0: normal). */
+    fun testAudioHang(closeMs: Int, openMs: Int = 0) = nativeTestAudioHang(handle, closeMs, openMs)
 
     /** The engine's and the audio stream's status (rfme_status, rfmo_status). */
     fun status(): JSONObject = JSONObject(nativeStatus(handle))
@@ -190,5 +221,13 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         @JvmStatic private external fun nativeLcdHash(h: Long): Int
         @JvmStatic private external fun nativeColours(h: Long): Int
         @JvmStatic private external fun nativeTestDisconnect(h: Long)
+        @JvmStatic private external fun nativeStreamOpen(h: Long, device: Int, usbSafe: Boolean, forbidden: IntArray, out: LongArray): String
+        @JvmStatic private external fun nativeStreamStart(s: Long): String
+        @JvmStatic private external fun nativeStreamActivate(s: Long)
+        @JvmStatic private external fun nativeStreamDeactivate(s: Long)
+        @JvmStatic private external fun nativeStreamClose(s: Long)
+        @JvmStatic private external fun nativeStreamInfo(s: Long, refresh: Boolean, out: LongArray)
+        @JvmStatic private external fun nativeClockSwap(h: Long, from: Int, to: Int): Boolean
+        @JvmStatic private external fun nativeTestAudioHang(h: Long, closeMs: Int, openMs: Int)
     }
 }

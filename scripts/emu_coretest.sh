@@ -5,7 +5,8 @@
 # boots the AVD headless if no emulator runs it (no window, no audio, no snapshot saved), installs, runs CoreTest (A0:
 # ChoralRoot boots through the engine, a key held, 3 s rendered offline through the render-ahead ring, the Oboe
 # stream tried) and CoresTest (A2: all six cores boot and sound, their render load, the flash files, power cycles,
-# sound off/on, the stream reopened after a disconnect), prints the summary and saves coretest.json and the log
+# sound off/on, the stream reopened after a disconnect) and AudioControlDeviceTest (the audio-control thread: sound
+# on/off spam, output switches, a stuck close and a slow open with the main thread probed), prints the summary and saves coretest.json and the log
 # under $OUT; shuts down an emulator it booted.
 #
 #   scripts/emu_coretest.sh [AVD]          default RFM_Tablet; NOBUILD=1 skips the build; OUT=... (default
@@ -80,7 +81,7 @@ say "installing on $SERIAL"
 "$ADB" -s "$SERIAL" logcat -c || true
 "$ADB" -s "$SERIAL" shell run-as $PKG rm -f files/coretest.json || true
 
-CLASSES=$PKG.CoreTest,$PKG.CoresTest
+CLASSES=$PKG.CoreTest,$PKG.CoresTest,$PKG.AudioControlDeviceTest
 [ -n "${TEST:-}" ] && CLASSES=$PKG.$TEST
 say "$CLASSES"
 set +e
@@ -143,6 +144,9 @@ if 'oboe_reopen' in all:
     if 'again' in o:
         print(f"reopen      after a disconnect: {stream(o['again'])}; engine underruns {o.get('engine_underruns')}, ring {o.get('ring_target')}")
     print(f"outputs     {o.get('outputs')}")
+for k in ['audio_spam', 'audio_switch', 'audio_stuck_close', 'audio_slow_open']:
+    if k in all:
+        print(f"{k:<18} " + ", ".join(f"{a}={b}" for a, b in all[k].items() if a not in ('stream', 'states', 'outputs', 'pass')))
 for k, v in all.items():
     print(f"  {k:<22} {'PASS' if v.get('pass') else 'FAIL'}")
 EOF
