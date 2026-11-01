@@ -43,3 +43,15 @@ file(GLOB RFM_LZFSE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/lzfse/src/*.c)
 add_library(rfmlzfse SHARED ${RFM_LZFSE_SRC} ${CMAKE_CURRENT_SOURCE_DIR}/lzfse/lzfse_jni.c)
 target_compile_options(rfmlzfse PRIVATE -O2 -Wno-unused-parameter)
 target_link_options(rfmlzfse PRIVATE -Wl,-z,max-page-size=16384)
+
+# (A4) imported firmware: wasm3 v0.5.0 (native/wasm3, MIT; its release flags in every build, as on iOS: the
+# interpreter needs the optimiser's tail calls) and the .rfm1 loader (RFMWasmCore.cpp, rfm_wasm_jni.cpp) in rfmcore
+set(W3 ${CMAKE_CURRENT_SOURCE_DIR}/wasm3/source)
+add_library(wasm3 STATIC ${W3}/m3_bind.c ${W3}/m3_code.c ${W3}/m3_compile.c ${W3}/m3_core.c ${W3}/m3_emit.c
+    ${W3}/m3_env.c ${W3}/m3_exec.c ${W3}/m3_function.c ${W3}/m3_info.c ${W3}/m3_module.c ${W3}/m3_optimize.c
+    ${W3}/m3_parse.c)
+target_include_directories(wasm3 PUBLIC ${W3})
+target_compile_definitions(wasm3 PRIVATE NASSERTS)
+target_compile_options(wasm3 PRIVATE -std=gnu11 -O3 -UDEBUG -fomit-frame-pointer -fno-stack-check -fno-stack-protector -w)
+target_sources(rfmcore PRIVATE ${R}/RFMWasmCore.cpp ${R}/rfm_wasm_jni.cpp)
+target_link_libraries(rfmcore PRIVATE wasm3)
