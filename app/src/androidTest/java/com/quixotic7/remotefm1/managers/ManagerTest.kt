@@ -82,8 +82,13 @@ class ManagerTest {
         assertTrue("the manager connected and read the firmware: $state (sent ${b.sent}, received ${b.received})", ok)
         assertTrue("the page's SysEx reached the core", b.sent > 0)
         assertTrue("the core's replies came back", b.received > 0)
+        // (a new copy; or, when an earlier test left an event copy of these very bytes, that copy is kept as it is,
+        // as on iOS: the newest copy is an event copy of the flash as saved)
+        val flash = java.io.File(rule.activity.filesDir, "cores/choralroot.bin")
         assertTrue("a safety copy before manager write",
-                   until(5_000) { m.safety.safetyCopies("choralroot").let { it.size > copies0 || it.any { s -> s.reason.contains("manager") } } })
+                   until(5_000) { m.safety.safetyCopies("choralroot").let { it.size > copies0 || it.any { s -> s.reason.contains("manager") } ||
+                       it.firstOrNull()?.let { s -> s.kind == com.quixotic7.remotefm1.data.FlashHistory.Kind.EVENT &&
+                           s.sha256 == com.quixotic7.remotefm1.FlashFile.sha256(flash.readBytes()) } == true } })
         rule.runOnUiThread { a.overlay = null }                      // (Done)
         assertTrue(until(3_000) { a.overlay == null && ManagerBridge.current == null })
     }

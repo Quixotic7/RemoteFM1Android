@@ -53,8 +53,10 @@ data class LaunchOptions(
         fun from(extras: android.os.Bundle?): LaunchOptions {
             if (extras == null) return LaunchOptions()
             fun flag(k: String) = extras.getBoolean(k, false) || extras.getString(k) == "1" || extras.getString(k) == "true"
+            // (A8) the fake and virtual units are for tests: a release build ignores them
+            val dbg = BuildConfig.DEBUG
             return LaunchOptions(
-                fake = flag("fake"), fakeBle = flag("fakeble"), virtual = flag("virtual"),
+                fake = dbg && flag("fake"), fakeBle = dbg && flag("fakeble"), virtual = dbg && flag("virtual"),
                 source = extras.getString("source"), mode = extras.getString("mode"), core = extras.getString("core"),
                 sound = if (extras.containsKey("sound")) flag("sound") else null,
                 output = extras.getString("output"),

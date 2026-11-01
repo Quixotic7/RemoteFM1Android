@@ -3,6 +3,41 @@
 An Android phone and tablet host for FM-1 firmware cores, the port of RemoteFM1 for iOS (`../RemoteFM1IOS`). See
 [PLAN.md](PLAN.md) for the design and the milestones.
 
+## Install (sideload)
+
+RemoteFM1 for Android is not in the Play Store. You install the APK yourself:
+
+1. On the phone or tablet, download `RemoteFM1-<version>.apk` from the
+   [GitHub Releases](https://github.com/Quixotic7/RemoteFM1Android/releases) page.
+2. Allow your browser or file manager to install apps: Android asks the first time you open the APK
+   (Settings › Apps › Special app access › Install unknown apps, then the app you downloaded it with).
+3. **Samsung:** turn off **Auto Blocker** while you install (Settings › Security and privacy › Auto Blocker). It blocks
+   every app not from a store. You can turn it back on afterwards.
+4. Open the APK and tap Install. Android may show a Play Protect note for an app it doesn't know: choose to install
+   anyway.
+
+Updates: download the newer APK and open it; it installs over the old one and keeps your firmware, states and
+settings (every release is signed with the same key). If Android refuses an update because the package conflicts
+with the one installed, that APK was not signed by me: don't uninstall to get round it, since uninstalling deletes
+the app's data (back it up first: Settings › Your data › Back up everything).
+
+What you need: Android 10 or newer on an arm64 phone or tablet (nearly every phone since 2017). For the panel, an
+FM-1 running the RemoteFM1 firmware, over USB (USB-C or an OTG adapter) or Bluetooth; without one you play on the
+screen. Known issues: on some Samsung/Qualcomm devices (seen on a Galaxy Tab A9+) sound through the FM-1's own USB
+audio doesn't work and can make the FM-1 drop off USB; play through the phone's speaker, headphones or Bluetooth
+(see [Known issues](#known-issues)).
+
+Check the download (optional): its SHA-256 is in the release notes and in `RemoteFM1-<version>.apk.sha256`:
+
+    shasum -a 256 RemoteFM1-0.1.0.apk                       # macOS / Linux; Windows: certutil -hashfile <file> SHA256
+
+and the signing certificate, with the Android SDK's build-tools:
+
+    apksigner verify --print-certs RemoteFM1-0.1.0.apk
+
+must show `Signer #1 certificate SHA-256 digest: 6fd9956c1ce876619e710ebb33ef44a5d72cf6968ca29b278613938b6a1799cb`.
+An APK with another certificate is not from me.
+
 Status: A2 (cores, sound, flash files) built and verified on the headless emulator; the tablet and the real FM-1's
 USB audio are still to be tried. A1 (the FM-1 link) verified on libremotefm1's fake unit; the real FM-1 test is
 [docs/A1-DEVICE-TEST.md](docs/A1-DEVICE-TEST.md). The APK carries the six built-in cores (ChoralRoot 0.26.1, Felucca
@@ -92,6 +127,18 @@ The cores alone (all six, or the ones named):
 
 It prints a line per core and fails only when ChoralRoot does (`RFM_REQUIRED="a b"` for others).
 
+The signed release APK (A8; the owner's key, kept outside the repo):
+
+    scripts/build_release.sh                        # NOCLEAN=1 skips the clean
+
+It builds the six cores and the app from clean, signs with the key named in
+`~/.android-keys/remotefm1-release.properties` (storeFile, storePassword, keyAlias, keyPassword; `RFM_SIGNING_PROPS`
+as a Gradle property or env var names another file; without one a release build stops, it is never signed with the
+debug key), checks the certificate (SHA-256 `6fd9956c...a1799cb`), the v2/v3 signatures, zip alignment, the 16 KB
+ELF alignment of every `.so`, the cores and engine present and no debug-only parts in the manifest, and writes
+`build/release/RemoteFM1-<version>.apk` with its `.sha256`. `./gradlew releaseApk` alone builds and copies the APK
+without the checks. R8 is off (JNI names, the JSON code and the web editors' `@JavascriptInterface` stay as written).
+
 ## Run
 
     adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
@@ -100,7 +147,9 @@ It prints a line per core and fails only when ChoralRoot does (`RFM_REQUIRED="a 
 Launch extras (iOS's launch arguments): `--ez fake true` (libremotefm1's fake unit in the app: no MIDI device is
 touched), `--ez fakeble true` (the fake as a Bluetooth unit), `--ez virtual true` (debug: the real Android MIDI path on
 the virtual FM-1), `--es source fm1|tablet`, `--es mode pattern|core`, `--es core <id>`, `--ez sound true`,
-`--es page diagnostics|bluetooth`. Source, mode and core are remembered.
+`--es page diagnostics|bluetooth`. Source, mode and core are remembered. Release builds ignore the test-only extras
+(`fake`, `fakeble`, `virtual`, and the faceplate's `installdemo`, `cartdemo`, `fm1prompt`, `demomap`); the rest
+(source, mode, core, sound, output, page, and the faceplate's view/sheet/theme ones) still work there.
 
 ## Test
 

@@ -37,6 +37,19 @@ iOS's Web MIDI injected). A3's leftovers: the wiped-memory card, the States mirr
 foreground), the Bluetooth page from the FM-1 card. Tested with virtual devices (the debug build's keyboard and OMX-27)
 and ChoralRoot's manager from the live site; its "done when" on hardware waits for a real keyboard, OMX-27 and FM-1.
 
+A8 prepared locally (2026-11-01): 0.1.0 (versionCode 1), signed with the release key, `scripts/build_release.sh`
+(clean build, signature and certificate, v2/v3, zip and 16 KB ELF alignment, the cores, no debug parts) writes
+`build/release/RemoteFM1-0.1.0.apk` and its `.sha256`; the release APK installed, started and played ChoralRoot on
+the headless emulator; README "Install (sideload)", `docs/RELEASE-NOTES-0.1.0.md`. Not tagged, pushed or published:
+waits for the owner's OK.
+
+**The release key (owner: back it up).** `~/.android-keys/remotefm1-release.jks` (the keystore) and
+`~/.android-keys/remotefm1-release.properties` (its passwords and alias) on this Mac, outside the repo. Back up both
+files together somewhere safe and offline (a password manager's file attachments, an encrypted disk); neither is ever
+committed. Certificate SHA-256 `6F:D9:95:6C:1C:E8:76:61:9E:71:0E:BB:33:EF:44:A5:D7:2C:F6:96:8C:A2:9B:27:86:13:93:8B:6A:17:99:CB`.
+If the key is lost, no later APK can install over 0.1.0: every user would have to uninstall (losing the app's data
+unless they backed it up) and install the new one.
+
 Owner's answers (2026-11-01): install the Android tooling (yes); test device: the owner's Samsung Galaxy Tab A9+
 (SM-X210, Android 16 / API 36, arm64, 1200x1920; adb serial R95Y906QALT; Samsung's Auto Blocker must be off for adb and
 sideloading); copy RFMCore from RemoteFM1IOS (yes); app id `com.quixotic7.remotefm1`, name "RemoteFM1"; a local
@@ -154,7 +167,7 @@ headless emulator with the fake unit, and on a real Android device with the FM-1
 | A5 | Data safety (iOS section 18): safety copies and history, Reset, named states, `.rfm1state` share/import, the States mirror and Back up everything / Restore (in the folder the user picks), version questions, the wiped-memory card | a state saved on the iPhone app loads on Android and back; the iOS tests' cases pass in Kotlin |
 | A6 | MIDI: controller input, Keys from MIDI, MIDI learn, the OMX-27, the FM-1's TRS MIDI in, velocity and pressure (TOUCH), the firmware's web managers in a WebView | a USB keyboard plays the keys, a learned knob turns KN1, ChoralRoot's manager reads the running firmware |
 | A7 | The FM-1 itself: install RemoteFM1 (FM1Kit port, releases.json, checks, resume, the install prompt), send a DX7 cartridge and manage user banks | on the simulated FM-1 (ported `SimulatedFM1`) a full install and a cut-off resume pass; on a real FM-1 over USB an update installs. **The firmware session does the real flash, never this one** |
-| A8 | Release: a local release key (kept outside the repo, backed up by the owner), a signed release APK, README with sideload steps, a GitHub release | the owner OKs the APK, then the release is published |
+| A8 | Release: a local release key (kept outside the repo, backed up by the owner), a signed release APK, README with sideload steps, a GitHub release | the owner OKs the APK, then the release is published. Prepared 2026-11-01: `scripts/build_release.sh`, `build/release/RemoteFM1-0.1.0.apk` (+ `.sha256`), README "Install (sideload)", docs/RELEASE-NOTES-0.1.0.md; release build ignores the test-only launch extras; R8 off. Waits for the OK, the tag and the GitHub release |
 
 Code is written by Opus subagents, one milestone at a time; Claude designs, briefs, reviews and tests (the owner's
 rule). Nothing is pushed or released without the owner's OK.

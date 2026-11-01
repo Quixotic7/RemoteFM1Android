@@ -54,13 +54,17 @@ data class UiLaunch(
             if (b == null) return UiLaunch()
             fun s(k: String) = b.get(k)?.toString()
             fun flag(k: String) = s(k).let { it == "true" || it == "1" || it == "on" }
+            // (A8) the demos (made-up data, a simulated install, a replaced MIDI map) only in debug builds
+            val dbg = com.quixotic7.remotefm1.BuildConfig.DEBUG
+            fun demo(k: String) = if (dbg) s(k) else null
+            fun demoFlag(k: String) = dbg && flag(k)
             return UiLaunch(
                 view = s("view"), deck = s("deck"), knobs = s("knobs"), sheet = flag("sheet"), sheetPage = s("sheetpage"),
                 theme = s("theme"), themeEditor = flag("themeeditor"),
                 protector = s("protector")?.let { it == "on" || it == "true" || it == "1" },
                 peel = s("peel")?.toFloatOrNull(), displayAlone = flag("displayalone"), steps = flag("steps"), page = s("page"),
-                installDemo = s("installdemo"), cartDemo = flag("cartdemo"), fm1Prompt = s("fm1prompt"),
-                learn = flag("learn"), learnPick = s("learnpick"), demoMap = flag("demomap"), sheetScroll = s("sheetscroll"),
+                installDemo = demo("installdemo"), cartDemo = demoFlag("cartdemo"), fm1Prompt = demo("fm1prompt"),
+                learn = flag("learn"), learnPick = s("learnpick"), demoMap = demoFlag("demomap"), sheetScroll = s("sheetscroll"),
                 openManager = flag("openmanager"), modeSource = s("modesource"),
             )
         }
