@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- (debug builds) the virtual FM-1 FakeFm1Service shows: one port each way; the name is Fm1Candidate.VIRTUAL_NAME -->
+<devices>
+    <device manufacturer="RemoteFM1" product="Fake FM-1" name="RemoteFM1 Fake FM-1">
+        <input-port name="in" />
+        <output-port name="out" />
+    </device>
+</devices>

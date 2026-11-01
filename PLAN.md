@@ -1,6 +1,10 @@
 # RemoteFM1 for Android (plan)
 
-Status (2026-11-01): A0 done (skeleton, engine, all six cores; ChoralRoot plays on the emulator and the Tab A9+ through Oboe, 9.3 ms, 0 underruns). Next: A1, the FM-1 link.
+Status (2026-11-01): A0 done (skeleton, engine, all six cores; ChoralRoot plays on the emulator and the Tab A9+ through Oboe, 9.3 ms, 0 underruns).
+A1 built and verified on the fake unit (14 link tests pass on the emulator and the Tab A9+, in-process and through
+Android's MIDI service with a virtual FM-1 over AMidi); its "done when" waits for the real FM-1 test
+(docs/A1-DEVICE-TEST.md). A1 also brought forward from A2/A6: Core mode on the link with the core picker and sound
+(no flash files yet), the foreground service, TOUCH and TRS MIDI in (the engine had them).
 
 Owner's answers (2026-11-01): install the Android tooling (yes); test device: the owner's Samsung Galaxy Tab A9+
 (SM-X210, Android 16 / API 36, arm64, 1200x1920; adb serial R95Y906QALT; Samsung's Auto Blocker must be off for adb and
@@ -112,7 +116,7 @@ headless emulator with the fake unit, and on a real Android device with the FM-1
 | | What | Done when |
 | --- | --- | --- |
 | A0 | Toolchain and skeleton: the SDK, NDK and emulator installed; Gradle project (`app`, `native` with CMake); RemoteFM1, FM1VST and the firmware repos as submodules at the iOS app's pins; libremotefm1 + the engine + one core built for arm64; a JNI smoke test | the APK builds from a clean checkout; on the headless emulator ChoralRoot boots on the fake unit and its first audio frames aren't silent |
-| A1 | The FM-1 link: AMidi back end, USB MIDI discovery and permission, the BLE scan page, HELLO, session, M1's test pattern, the Diagnostics page (HELLO_R fields, link stats) | on a real phone: the pattern moves on the FM-1 over USB and Bluetooth, its keys light their LEDs |
+| A1 | The FM-1 link: AMidi back end, USB MIDI discovery (no USB permission is needed for MIDI; a USB_DEVICE_ATTACHED filter opens the app), the BLE scan page, HELLO, session, M1's test pattern, Core mode on the link, the Diagnostics page (HELLO_R fields, link stats), the foreground service | on a real phone: the pattern moves on the FM-1 over USB and Bluetooth, its keys light their LEDs. Fake unit: done (`scripts/emu_linktest.sh`); real FM-1: docs/A1-DEVICE-TEST.md |
 | A2 | Cores and sound: every core as `.so`, the engine with render-ahead on Oboe, the flash files (safe writes, `.prev`), the foreground service, the audio output picker | ChoralRoot plays from the FM-1, heard on the phone and through the FM-1's USB audio; a power cycle keeps its settings; underruns counted and 0 on the test phone |
 | A3 | The faceplate in Compose: Full (phone portrait with the scrolling keybed, landscape, tablet), Controls, Screen; the themes and editor; display alone; screen protector; the pull-down sheet with its pages; button names; touch keys without an FM-1 ("This phone") | emulator screenshots match iOS's `sim_shots.sh` set page for page; playable with no FM-1 |
 | A4 | Firmware: the library, `.rfm1` (wasm3), Add firmware / Open with, Get firmware (both feeds, updates, badge, offline cache), delete, thumbnails, the Firmware card (description, View source) | the Melodee and Felucca `.rfm1` from the catalog install and play next to the built-in cores |

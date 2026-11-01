@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- The FM-1 running RemoteFM1 (also ChoralRoot / TransitFM1 on the same unit): pid.codes 1209:0001
+     (FM1VST plugin/RemoteCandidates.h). Plugging it in offers to open RemoteFM1. -->
+<resources>
+    <usb-device vendor-id="4617" product-id="1" />
+</resources>

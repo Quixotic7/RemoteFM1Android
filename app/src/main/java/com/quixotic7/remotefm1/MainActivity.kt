@@ -2,148 +2,432 @@
 // Copyright (C) 2026 RemoteFM1 contributors
 package com.quixotic7.remotefm1
 
-import android.graphics.Bitmap
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.delay
-import java.nio.ByteBuffer
 
-/** A0's screen: the core's name, its LCD, its status, a key to hold and the audio switch (the faceplate is A3's). */
+/**
+ * A1's screens (the faceplate is A3's): the main page (sound source, mode, the core, the sound, the screen being
+ * sent), Diagnostics (RemoteFM1IOS App/DiagnosticsScreen.swift's cards: Unit, Link, Panel, Core, and the MIDI devices
+ * Android reports) and the Bluetooth page (scan, connect, the remembered unit). Launch extras (adb `am start --ez`):
+ * fake, fakeble, virtual (debug), source fm1|tablet, mode pattern|core, core <id>, sound, page diagnostics|bluetooth.
+ */
 class MainActivity : ComponentActivity() {
-    private var engine: RfmEngine? = null
-    private var coreName = "no core"
-    private var startError: String? = null
+    private lateinit var model: AppModel
+    private var page by mutableStateOf(Page.MAIN)
+
+    enum class Page { MAIN, DIAGNOSTICS, BLUETOOTH }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        RfmEngine.scan(applicationInfo.nativeLibraryDir)
-        val cores = RfmEngine.cores().getJSONArray("cores")
-        val choral = (0 until cores.length()).map { cores.getJSONObject(it) }.firstOrNull { it.getString("id") == CORE }
-        val e = RfmEngine()
-        engine = e
-        if (choral == null) {
-            startError = "ChoralRoot not found in ${applicationInfo.nativeLibraryDir}"
-        } else {
-            coreName = "${choral.getString("name")} ${choral.getString("version")}"
-            startError = e.load(CORE) ?: run {
-                e.boot()
-                e.setClock(RfmEngine.CLOCK_TIMER)
-                null
-            }
-        }
-        setContent { MaterialTheme(colorScheme = darkColorScheme()) { Screen(e) } }
+        model = AppModel.get(this, LaunchOptions.from(intent.extras))
+        model.playingListener = { playing, text -> PlaybackService.update(applicationContext, playing, text) }
+        PlaybackService.update(applicationContext, model.playing, model.playingText)
+        handle(intent)
+        setContent { MaterialTheme(colorScheme = darkColorScheme()) { App() } }
     }
 
-    override fun onDestroy() {
-        engine?.close()
-        engine = null
-        super.onDestroy()
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handle(intent)
+    }
+
+    // a USB device the manifest's filter matched (the FM-1 plugged in): logged; Android's MIDI service opens it and
+    // RfmMidi finds it as a MIDI device (no USB permission is needed for that)
+    private fun handle(i: Intent?) {
+        when (i?.getStringExtra("page")) {
+            "diagnostics" -> page = Page.DIAGNOSTICS
+            "bluetooth" -> page = Page.BLUETOOTH
+        }
+        if (i?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
+            val d: UsbDevice? = if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+            else @Suppress("DEPRECATION") i.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            Log.i(AppModel.TAG, "USB attached: ${d?.let { "%04x:%04x %s / %s".format(it.vendorId, it.productId, it.manufacturerName, it.productName) }}")
+            model.link.rescan()
+        }
+    }
+
+    private fun askNotifications() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
     }
 
     @Composable
-    private fun Screen(e: RfmEngine) {
-        var status by remember { mutableStateOf("") }
-        var playing by remember { mutableStateOf(false) }
-        var audioError by remember { mutableStateOf<String?>(null) }
-        var lcdSeq by remember { mutableIntStateOf(0) }
-        val rgba = remember { ByteArray(240 * 240 * 4) }
-        val bitmap = remember { Bitmap.createBitmap(240, 240, Bitmap.Config.ARGB_8888) }
-        LaunchedEffect(Unit) {
-            while (true) {
-                val s = e.status()
-                val a = s.getJSONObject("audio")
-                status = "booted ${s.getInt("booted")}  clock ${s.getInt("clock")}  device ${s.getInt("dev_ms")} ms\n" +
-                    "renders ${s.getLong("renders")}  underruns ${s.getInt("underruns")}  core ${s.getInt("core_load_pct")} %\n" +
-                    "audio ${a.getString("api")} ${a.getInt("rate")} Hz  burst ${a.getInt("frames_per_burst")}  " +
-                    "rms ${"%.4f".format(a.getDouble("rms"))}"
-                val seq = e.preview(lcdSeq, rgba)
-                if (seq != lcdSeq) {
-                    lcdSeq = seq
-                    bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(rgba))
-                }
-                delay(100)
-            }
-        }
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text(coreName, fontSize = 28.sp)
-                startError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                Image(bitmap = bitmap.asImageBitmap().also { lcdSeq }, contentDescription = "the core's screen",
-                      modifier = Modifier.size(240.dp))
-                Text(status, fontFamily = FontFamily.Monospace)
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Button(onClick = {
-                        if (playing) {
-                            e.stopAudio()
-                            playing = false
-                        } else {
-                            audioError = e.startAudio()
-                            playing = audioError == null
-                        }
-                    }) { Text(if (playing) "Stop audio" else "Start audio") }
-                    HoldKey(e)
-                }
-                audioError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    private fun App() {
+        BackHandler(enabled = page != Page.MAIN) { page = Page.MAIN }
+        Surface(modifier = Modifier.fillMaxSize().safeDrawingPadding(), color = Theme.background, contentColor = Color.White) {
+            when (page) {
+                Page.MAIN -> MainPage()
+                Page.DIAGNOSTICS -> DiagnosticsPage()
+                Page.BLUETOOTH -> BluetoothPage()
             }
         }
     }
 
-    // a note key, down while touched
+    // ---------------------------------------------------------------- the main page
     @Composable
-    private fun HoldKey(e: RfmEngine) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .size(width = 160.dp, height = 48.dp)
-                .pointerInput(Unit) {
-                    awaitEachGesture {
-                        awaitFirstDown()
-                        e.key(KEY, true)
-                        waitForUpOrCancellation()
-                        e.key(KEY, false)
+    private fun MainPage() {
+        val m = model
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("RemoteFM1", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                StatusPill(m.state, m.backend.isFake, m.source)
+            }
+            Label("Sound source")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(m.source == Source.TABLET, { m.useSource(Source.TABLET) }, { Text("This tablet (no link)") })
+                FilterChip(m.source == Source.FM1, { askNotifications(); m.useSource(Source.FM1) }, { Text("FM-1") })
+            }
+            Label("Mode")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(m.mode == Mode.PATTERN, { m.useMode(Mode.PATTERN) }, { Text("Test pattern") })
+                FilterChip(m.mode == Mode.CORE, { m.useMode(Mode.CORE) }, { Text("Firmware core") })
+                Spacer(Modifier.width(12.dp))
+                if (m.mode == Mode.CORE) {
+                    FilterChip(m.soundOn, { askNotifications(); m.setSound(!m.soundOn) }, { Text(if (m.soundOn) "Sound on" else "Sound off") })
+                } else {
+                    FilterChip(m.patternOn, { m.setPattern(!m.patternOn) }, { Text("Moving") })
+                }
+            }
+            Label("Firmware")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                m.cores.forEach { c ->
+                    val id = c.getString("id")
+                    FilterChip(m.selected == id, { m.select(id) }, { Text(c.getString("name")) })
+                }
+            }
+            if (m.message.isNotEmpty()) Text(m.message, color = Theme.accent, fontSize = 13.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                Preview(260)
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(m.statusText, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                    m.hello?.let { Text("${it.name} ${it.firmwareVersion} · ${if (it.isBluetooth) "Bluetooth" else "USB"}", fontSize = 13.sp) }
+                    if (m.mode == Mode.CORE) Text(m.coreName + if (m.soundOn) " · on the tablet's speaker" else "", fontSize = 13.sp)
+                    Button({ page = Page.BLUETOOTH }) { Text("Bluetooth…") }
+                    OutlinedButton({ page = Page.DIAGNOSTICS }) { Text("Diagnostics") }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun Preview(size: Int) {
+        val frame = model.previewFrame.intValue
+        Box(Modifier.size(size.dp).clip(RoundedCornerShape(6.dp)).background(Theme.card)) {
+            if (frame != 0) {
+                Image(model.preview.asImageBitmap().also { frame }, contentDescription = "the screen being sent to the FM-1",
+                      modifier = Modifier.fillMaxSize(), filterQuality = FilterQuality.None)
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- Diagnostics
+    @Composable
+    private fun DiagnosticsPage() {
+        val m = model
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Diagnostics", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                OutlinedButton({ m.restartLink() }) { Text("Restart link") }
+                Button({ page = Page.MAIN }) { Text("Done") }
+                StatusPill(m.state, m.backend.isFake, m.source)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column(Modifier.widthIn(max = 480.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Preview(300)
+                    PanelCard()
+                    MidiCard()
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    if (m.mode == Mode.CORE) CoreCard()
+                    UnitCard()
+                    LinkCard()
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun UnitCard() {
+        Card("Unit (HELLO_R)") {
+            val h = model.hello
+            if (h == null) {
+                Mono("No unit has answered yet.", Theme.dim)
+            } else {
+                Rows(listOf(
+                    "name" to h.name,
+                    "firmware" to "${h.firmwareVersion} (ver ${h.version})",
+                    "proto" to "${h.proto}",
+                    "identity" to h.identity,
+                    "link" to (if (h.isBluetooth) "Bluetooth" else "USB") + " (HELLO_R)" +
+                        model.stats.frameLink.let { if (it.isNotEmpty()) ", Android: $it" else "" },
+                    "session" to (if (h.session) "running" else "none") + " (when it answered)",
+                    "transports" to "0x%02X ".format(h.transports) + h.transportNames,
+                    "caps" to "0x%04X ".format(h.caps) + h.capNames,
+                    "sxq" to "${h.sxq}",
+                    "body max" to "SysEx ${h.sxBodyMax}, bulk ${h.bkBodyMax}",
+                    "screen" to "${h.screenW}x${h.screenH}, ${h.maxInFlight} in flight",
+                ))
+            }
+        }
+    }
+
+    @Composable
+    private fun LinkCard() {
+        val s = model.stats
+        Card("Link") {
+            Rows(listOf(
+                "state" to model.statusText,
+                "frames" to "${s.frames}, acks ${s.acks}, ${"%.0f".format(s.fps)} fps",
+                "ack ms" to "last ${s.ackMsLast}, avg ${s.ackMsAvg}, max ${s.ackMsMax}, timeouts ${s.ackTimeouts}",
+                "in flight" to "${s.inFlight} frames, pending ${s.pending}",
+                "bytes" to "wire ${s.wireBytes}, body ${s.bodyBytes}",
+                "budget" to "${s.budget} B/frame, cap ${s.wireCap}, every ${s.frameMs} ms",
+                "ble" to if (s.ble) "1, HOLD ${if (s.hold) "on" else "off"}" else "0",
+                "held" to "${s.held}, reduced ${s.reduced}, refined ${s.refined}",
+                "sessions" to "${s.sessions}, discoveries ${s.discoveries}, runs ${s.runs}",
+                "events" to "${s.eventsIn}, dropped ${s.eventsDropped}",
+                "touch" to s.touchText(model.hello),
+                "TRS MIDI in" to "${s.trsMidiIn}" + if (s.trsMidiDropped > 0) ", dropped ${s.trsMidiDropped}" else "",
+                "Android MIDI" to "${s.midiLinks} links, in ${s.rxBytes} B, out ${s.txBytes} B, short writes ${s.txShort}",
+                "MIDI setup" to "${RfmMidi.changes} changes",
+            ))
+            if (model.lastLog.isNotEmpty()) Mono(model.lastLog, Theme.dim, 11)
+        }
+    }
+
+    @Composable
+    private fun PanelCard() {
+        val m = model
+        Card("Panel") {
+            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                for (k in 0 until 27) Box(Modifier.weight(1f).height(18.dp).clip(RoundedCornerShape(2.dp))
+                    .background(if (m.heldKeys and (1L shl k) != 0L) Theme.accent else Color.White.copy(alpha = 0.12f)))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                PanelEvent.buttonNames.forEachIndexed { b, n ->
+                    Box(Modifier.weight(1f).clip(RoundedCornerShape(3.dp))
+                        .background(if (m.heldButtons and (1L shl b) != 0L) Theme.teal else Color.White.copy(alpha = 0.08f))
+                        .padding(vertical = 3.dp), contentAlignment = Alignment.Center) { Text(n, fontSize = 9.sp, maxLines = 1) }
+                }
+            }
+            Mono("MASTER ${m.master ?: "–"}", Theme.dim)
+            if (m.events.isEmpty()) Mono("No events yet: press a key on the FM-1.", Theme.dim)
+            else m.events.forEach { Mono(it.text) }
+        }
+    }
+
+    @Composable
+    private fun CoreCard() {
+        val s = model.engineStatus
+        val a = s.optJSONObject("audio")
+        val clock = listOf("stopped", "audio", "timer (no sound)", "caller").getOrElse(s.optInt("clock")) { "?" }
+        Card("Core") {
+            Rows(listOf(
+                "firmware" to model.coreName,
+                "state" to if (s.optInt("halted") != 0) "halted" else if (s.optInt("booted") != 0) "running, clock $clock" else "not booted",
+                "attached" to if (s.optInt("attached") != 0) "yes: the FM-1's panel plays it" else "no",
+                "device" to "%.1f s, %d screens, %d keys".format(s.optInt("dev_ms") / 1000.0, s.optInt("snapshots"), s.optInt("keys_pressed")),
+                "core load" to "${s.optInt("cpu_pct")} % (its own); core thread ${s.optInt("core_load_pct")} %",
+                "render" to "avg ${s.optInt("render_avg_us")} us, max ${s.optInt("render_max_us")} us",
+                "audio" to if (a != null && a.optInt("running") != 0)
+                    "${a.optString("api")} ${a.optInt("rate")} Hz, burst ${a.optInt("frames_per_burst")}, xruns ${a.optInt("xruns")}, underruns ${s.optInt("underruns")}"
+                else "off",
+                "latency" to "${s.optInt("latency_frames")} frames (ring ${s.optInt("ring_target")})",
+                "flash" to "not kept yet (A2): boots fresh",
+            ))
+        }
+    }
+
+    @Composable
+    private fun MidiCard() {
+        Card("MIDI devices (Android)") {
+            val list = model.midiEntries
+            if (list.isEmpty()) Mono("None: plug the FM-1 in over USB, or connect it on the Bluetooth page.", Theme.dim)
+            list.forEach { e ->
+                val d = e.desc
+                Mono("${d.displayName} · ${d.transportName}" + (d.usbVid?.let { " %04x:%04x".format(it, d.usbPid ?: 0) } ?: ""))
+                Mono("  " + when {
+                    e.nativeId > 0 -> "linked: ${e.candidacy.why}"
+                    e.opening -> "opening…"
+                    e.error.isNotEmpty() -> e.error
+                    else -> "not used: ${e.candidacy.why}"
+                }, Theme.dim, 11)
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- Bluetooth
+    @Composable
+    private fun BluetoothPage() {
+        val ctx = LocalContext.current
+        var found by remember { mutableStateOf<List<BleScanner.Found>>(emptyList()) }
+        var tick by remember { mutableStateOf(0) }
+        val scanner = remember { BleScanner(ctx) { found = it; tick++ } }
+        var missing by remember { mutableStateOf(scanner.missing()) }
+        val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            missing = scanner.missing()
+            if (missing.isEmpty()) scanner.start()
+        }
+        DisposableEffect(Unit) {
+            if (missing.isEmpty()) scanner.start()
+            onDispose { scanner.stop() }
+        }
+        val m = model
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Bluetooth", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                Button({ page = Page.MAIN }) { Text("Done") }
+            }
+            Text("An FM-1 running RemoteFM1 advertises as \"FM-1 XXXX\". Connect it here; the app reopens it next time.",
+                 fontSize = 13.sp, color = Theme.dim)
+            if (missing.isNotEmpty()) {
+                Button({ ask.launch(missing.toTypedArray()) }) {
+                    Text(if (Build.VERSION.SDK_INT >= 31) "Allow nearby devices" else "Allow location (needed to scan on Android 10 and 11)")
+                }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton({ scanner.start() }, enabled = !scanner.scanning) { Text(if (scanner.scanning) "Scanning…" else "Scan again") }
+                    scanner.error?.let { Text(it, color = Theme.accent, fontSize = 13.sp) }
+                    if (m.bleConnecting) Text("connecting…", fontSize = 13.sp)
+                }
+            }
+            m.reconnect.address?.let { addr ->
+                Card("Remembered unit") {
+                    Mono("$addr · " + if (RfmMidi.bluetoothOpen(addr)) "open" else if (m.reconnect.paused) "disconnected" else "not open")
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton({ m.disconnectBluetooth() }) { Text("Disconnect") }
+                        OutlinedButton({ m.forgetBluetooth() }) { Text("Forget") }
                     }
-                },
-        ) {
-            Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.fillMaxSize()) {
-                Box(contentAlignment = Alignment.Center) { Text("Hold key C") }
+                }
+            }
+            Card("Bluetooth MIDI devices nearby") {
+                if (found.isEmpty()) Mono(if (scanner.scanning) "Looking…" else "None found.", Theme.dim)
+                found.sortedByDescending { it.isFm1 }.forEach { f ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Column(Modifier.weight(1f)) {
+                            Text(f.name.ifEmpty { "(no name)" }, fontWeight = if (f.isFm1) FontWeight.Bold else FontWeight.Normal)
+                            Mono("${f.address} · ${f.rssi} dBm" + if (f.isFm1) " · FM-1" else " · not an FM-1: no HELLO goes to it", Theme.dim, 11)
+                        }
+                        Button({ scanner.stop(); m.connectBluetooth(f.device) }, enabled = !m.bleConnecting) {
+                            Text(if (RfmMidi.bluetoothOpen(f.address)) "Open" else "Connect")
+                        }
+                    }
+                }
+            }
+            MidiCard()
+            Text("$tick", color = Color.Transparent, fontSize = 1.sp)
+        }
+    }
+
+    // ---------------------------------------------------------------- bits
+    @Composable
+    private fun StatusPill(state: LinkState, fake: Boolean, source: Source) {
+        val c = when (state) {
+            is LinkState.Connected -> Color(0xFF34C759)
+            LinkState.Searching, LinkState.Starting, LinkState.Lost, LinkState.Stopping -> Color(0xFFFFCC00)
+            LinkState.NotFound, is LinkState.InUse -> Color(0xFFFF9500)
+            is LinkState.Error -> Color(0xFFFF3B30)
+            is LinkState.Stopped -> Color.Gray
+        }
+        val title = if (source == Source.TABLET) "This tablet" else state.title + if (fake) " (fake)" else ""
+        Row(Modifier.clip(RoundedCornerShape(50)).background(c.copy(alpha = 0.18f)).padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(c))
+            Text(title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        }
+    }
+
+    @Composable
+    private fun Label(t: String) = Text(t.uppercase(), fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Theme.dim)
+
+    @Composable
+    private fun Card(title: String, content: @Composable () -> Unit) {
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Theme.card).padding(12.dp),
+               verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Label(title)
+            content()
+        }
+    }
+
+    @Composable
+    private fun Rows(rows: List<Pair<String, String>>) {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            rows.forEach { (k, v) ->
+                Row {
+                    Text(k, Modifier.width(110.dp), fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Theme.dim)
+                    Text(v, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                }
             }
         }
     }
 
-    companion object {
-        const val CORE = "choralroot"
-        const val KEY = 7       // C4: key 0 is F3 (MIDI 53)
+    @Composable
+    private fun Mono(t: String, color: Color = Color.Unspecified, size: Int = 12) =
+        Text(t, fontFamily = FontFamily.Monospace, fontSize = size.sp, color = color)
+
+    object Theme {
+        val background = Color(0xFF0F1217)
+        val card = Color(0xFF1C1F26)
+        val accent = Color(0xFFFF8C29)
+        val teal = Color(0xFF29C7BF)
+        val dim = Color(0xFF9AA0AA)
     }
 }

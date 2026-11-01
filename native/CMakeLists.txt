@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 RemoteFM1 contributors
 # The app's native library, librfmcore.so (built by the app's Gradle build through externalNativeBuild):
-#   - libremotefm1 (vendor/RemoteFM1 host/src, portable C99, compiled in place; the FM-1 link uses it from A1 on)
-#   - the engine copied from RemoteFM1IOS (rfmcore/: RFMEngine, the device clock, the core loader, the MIDI map)
+#   - libremotefm1 (vendor/RemoteFM1 host/src, portable C99, compiled in place) and fm1remote's test pattern
+#   - the engine and the FM-1 link copied from RemoteFM1IOS (rfmcore/: RFMEngine, the device clock, the core loader,
+#     the MIDI map, RemoteLink, RFMCore) and the link's Android MIDI back end (rfmcore/android: AMidi)
 #   - FM1VST's engine/resampler.h and core-api/fm1core.h, in place
-#   - the Oboe output (rfmcore/RFMOboe.cpp; Oboe from its prefab package) and the JNI face (rfmcore/rfm_jni.cpp)
+#   - the Oboe output (rfmcore/RFMOboe.cpp; Oboe from its prefab package) and the JNI faces (rfmcore/rfm_jni.cpp: the
+#     engine; rfmcore/rfm_link_jni.cpp: the link, the MIDI device list, a standalone fake unit)
 # The cores are not built here: scripts/build_cores_android.sh makes them (libfm1core_<id>.so, jniLibs).
 cmake_minimum_required(VERSION 3.22)
 project(rfmcore LANGUAGES C CXX)
@@ -28,8 +30,10 @@ find_package(oboe REQUIRED CONFIG)
 set(R ${CMAKE_CURRENT_SOURCE_DIR}/rfmcore)
 add_library(rfmcore SHARED
     ${R}/RFMEngine.cpp ${R}/RFMDevice.cpp ${R}/RFMNativeCore.cpp ${R}/RFMSlots.cpp ${R}/RFMRealtime.cpp
-    ${R}/RFMMidiMap.cpp ${R}/RFMEchoCore.cpp ${R}/RFMLinkStub.cpp ${R}/RFMOboe.cpp ${R}/rfm_jni.cpp)
-target_include_directories(rfmcore PRIVATE ${R} ${R}/include ${FM1VST}/engine ${FM1VST}/core-api ${FM1VST}/plugin)
+    ${R}/RFMMidiMap.cpp ${R}/RFMEchoCore.cpp ${R}/RemoteLink.cpp ${R}/RFMCore.cpp ${R}/android/rfm_android.cpp
+    ${RFM}/host/tools/fm1remote/patterns.cpp ${R}/RFMOboe.cpp ${R}/rfm_jni.cpp ${R}/rfm_link_jni.cpp)
+target_include_directories(rfmcore PRIVATE ${R} ${R}/include ${FM1VST}/engine ${FM1VST}/core-api ${FM1VST}/plugin
+    ${RFM}/host/tools/fm1remote)
 target_compile_options(rfmcore PRIVATE -Wall -Wextra -Wno-unused-parameter)
-target_link_libraries(rfmcore PRIVATE remotefm1 oboe::oboe log dl)
+target_link_libraries(rfmcore PRIVATE remotefm1 oboe::oboe amidi log dl)
 target_link_options(rfmcore PRIVATE -Wl,-z,max-page-size=16384)

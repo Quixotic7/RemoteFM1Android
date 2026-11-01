@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // The JNI face of the engine for Kotlin (app/.../RfmEngine.kt): the core loader (rfms_*), one engine (rfme_*) with
-// its Oboe output (rfmo_*), and an offline render for tests. Status comes back as JSON text.
+// its Oboe output (rfmo_*), on an FM-1 link (RfmLink, rfm_link_jni.cpp) or headless, and offline renders for tests.
+// Status comes back as JSON text.
 #include <jni.h>
 
 #include <cmath>
@@ -11,7 +12,7 @@
 #include <vector>
 
 #include "RFMEngine.h"
-#include "RFMLinkStub.h"
+#include "RFMCore.h"
 #include "RFMOboe.h"
 #include "RFMRealtime.h"
 
@@ -128,10 +129,11 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeCores(JNI
     return utf(env, r.done());
 }
 
-JNIEXPORT jlong JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeCreate(JNIEnv *, jclass)
+// link: an RfmLink's handle (its rfmc_t, which must outlive the engine), 0 headless
+JNIEXPORT jlong JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeCreate(JNIEnv *, jclass, jlong link)
 {
     auto *h = new Host;
-    h->e = rfme_new(nullptr);           // (headless: the FM-1 link is A1's)
+    h->e = rfme_new(reinterpret_cast<rfmc_t *>(link));
     h->out = rfmo_new(h->e);
     return reinterpret_cast<jlong>(h);
 }
@@ -162,6 +164,66 @@ JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeBoot(JNI
         env->GetByteArrayRegion(flash, 0, (jsize)img.size(), reinterpret_cast<jbyte *>(img.data()));
     }
     return rfme_boot(host(p)->e, img.empty() ? nullptr : img.data(), (uint32_t)img.size()) ? JNI_TRUE : JNI_FALSE;
+}
+
+// attached: the engine plays the link's panel and shows on the unit; the link's test pattern stands aside
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeAttach(JNIEnv *, jclass, jlong p, jboolean on)
+{
+    rfme_attach(host(p)->e, on ? 1 : 0);
+}
+
+// tests: the echo core (its MIDI in back out, silence)
+JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTestLoadEcho(JNIEnv *, jclass, jlong p)
+{
+    return rfme_test_load_echo(host(p)->e) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetMidi(JNIEnv *, jclass, jlong p, jint keyChannel,
+                                                                             jint transpose, jboolean keyNotes,
+                                                                             jboolean useMap)
+{
+    rfme_set_midi(host(p)->e, keyChannel, transpose, keyNotes ? 1 : 0, useMap ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeMidiOutEnable(JNIEnv *, jclass, jlong p, jint on)
+{
+    rfme_midi_out_enable(host(p)->e, on);
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetOffline(JNIEnv *, jclass, jlong p, jboolean on)
+{
+    rfme_set_offline(host(p)->e, on ? 1 : 0);
+}
+
+// tests (the caller set RFME_CLOCK_AUDIO, offline): `count` renders of `frames` at `rate` (rfme_render_midi, no host
+// MIDI); returns the core's MIDI out packets taken after each, and the audio's sum of squares and samples in `level`
+// ([sum, n, peak])
+JNIEXPORT jintArray JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeRenderBlocks(JNIEnv *env, jclass, jlong p,
+                                                                                      jint count, jint frames,
+                                                                                      jdouble rate, jdoubleArray level)
+{
+    Host *h = host(p);
+    std::vector<float> L((size_t)frames), R((size_t)frames);
+    std::vector<jint> pk;
+    double sum = 0, peak = 0, n = 0;
+    for (int i = 0; i < count; i++) {
+        rfme_render_midi(h->e, L.data(), R.data(), (uint32_t)frames, rate, nullptr, 0);
+        for (int k = 0; k < frames; k++) {
+            sum += (double)L[(size_t)k] * L[(size_t)k] + (double)R[(size_t)k] * R[(size_t)k];
+            peak = std::fmax(peak, std::fmax(std::fabs((double)L[(size_t)k]), std::fabs((double)R[(size_t)k])));
+        }
+        n += 2.0 * frames;
+        for (uint32_t pkt = 0; rfme_midi_out_take(h->e, &pkt);)
+            pk.push_back((jint)pkt);
+    }
+    if (level && env->GetArrayLength(level) >= 3) {
+        const jdouble v[3] = {sum, n, peak};
+        env->SetDoubleArrayRegion(level, 0, 3, v);
+    }
+    jintArray a = env->NewIntArray((jsize)pk.size());
+    if (a && !pk.empty())
+        env->SetIntArrayRegion(a, 0, (jsize)pk.size(), pk.data());
+    return a;
 }
 
 JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetClock(JNIEnv *, jclass, jlong p, jint owner)
@@ -199,6 +261,7 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStatus(JN
     j.num("loaded", s.loaded);
     j.num("booted", s.booted);
     j.num("halted", s.halted);
+    j.num("attached", s.attached);
     j.num("clock", s.clock);
     j.str("core_id", s.core_id);
     j.str("kind", s.kind);
@@ -206,6 +269,12 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStatus(JN
     j.num("lcd_writes", s.lcd_writes);
     j.num("events_applied", s.events_applied);
     j.num("keys_pressed", s.keys_pressed);
+    j.num("events_dropped", s.events_dropped);
+    j.num("key_vel_last", s.key_vel_last);
+    j.num("key_lean_last", s.key_lean_last);
+    j.num("midi_out", s.midi_out);
+    j.num("midi_to_core", s.midi_to_core);
+    j.num("snapshots", s.snapshots);
     j.num("renders", (double)s.renders);
     j.num("render_frames", (double)s.render_frames);
     j.num("render_avg_us", s.render_avg_us);

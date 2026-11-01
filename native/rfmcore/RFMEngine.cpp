@@ -3,7 +3,7 @@
 // Copied from RemoteFM1IOS 0d1a98b RFMKit/Sources/RFMCore/RFMEngine.cpp; changes: Android. The host parameters
 // (RFMHostParams, the AU's parameter tree: rfme_hp_*, rfme_render_events) and the audio workgroup are left out;
 // time is rfm::nowTicks (ns) instead of mach ticks; the core thread is named with pthread_setname_np(self) and
-// runs at audio priority (RFMRealtime.h); the link is RFMLinkStub.h's stand-in until A1. Everything else as there.
+// runs at audio priority (RFMRealtime.h). Everything else as there.
 // The core engine (include/RFMEngine.h). Adapted from RemoteFM1 v0.2.2's host/tools/fm1remote/engine.cpp (Engine:
 // the between hook, the publish at most every frame period and only on change, the flash copy every 30 device s and
 // final_flash, the timer clock). Changed: ABI 6's fm1panel_t instead of emu_hal_t, with FM1VST v0.6.2's
@@ -33,7 +33,7 @@
 #include "RFMInternal.h"
 #include "RFMMidiMap.h"
 #include "RFMRealtime.h"
-#include "RFMLinkStub.h"
+#include "RemoteLink.h"
 
 static_assert(RFME_B_OCTUP == FM1P_B_OCTUP && RFME_B_SAVE == FM1P_B_SAVE && RFME_E_K4 == FM1P_E_K4, "labels");
 static_assert(RFMC_EV_KEY == RFM_EV_KEY && RFMC_EV_BUTTON == RFM_EV_BUTTON && RFMC_EV_ENC == RFM_EV_ENC &&

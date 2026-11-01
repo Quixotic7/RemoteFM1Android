@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
-// Copied from RemoteFM1IOS 0d1a98b RFMKit/Sources/RFMCore/RFMInternal.h; changes: RFMLinkStub.h (A0: the link's stand-in) instead of RFMCore.h.
+// Copied from RemoteFM1IOS 0d1a98b RFMKit/Sources/RFMCore/RFMInternal.h; unchanged.
 // RFMCore's internal pieces shared by RFMCore.cpp (the link and its pattern producer) and RFMEngine.cpp (the core):
 // a single-producer single-consumer queue and a triple buffer (the same as RemoteLink's and fm1remote's engine.h),
 // and how an engine reaches an rfmc_t's link.
@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <memory>
 
-#include "RFMLinkStub.h"
+#include "RFMCore.h"
 #include "rfm/codec.h"
 #include "rfm/panel.h"
 

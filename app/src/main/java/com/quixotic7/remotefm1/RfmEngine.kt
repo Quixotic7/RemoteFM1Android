@@ -6,10 +6,11 @@ import org.json.JSONObject
 
 /**
  * One FM-1 core engine (native/rfmcore: RFMEngine with its render-ahead core thread, the core loader, the Oboe
- * output). Headless until A1 brings the FM-1 link. Control calls are for one thread (the main thread or a test's).
+ * output), on the FM-1 [link] (which must outlive it) or headless (null). Control calls are for one thread (the main
+ * thread or a test's).
  */
-class RfmEngine : AutoCloseable {
-    private var handle: Long = nativeCreate()
+class RfmEngine(link: RfmLink? = null) : AutoCloseable {
+    private var handle: Long = nativeCreate(link?.handle ?: 0L)
 
     /** Loads the core [id] (libfm1core_<id>.so); null on success, else the error. */
     fun load(id: String): String? = nativeLoad(handle, id).ifEmpty { null }
@@ -18,6 +19,35 @@ class RfmEngine : AutoCloseable {
     fun boot(flash: ByteArray? = null): Boolean = nativeBoot(handle, flash)
 
     fun setClock(owner: Int) = nativeSetClock(handle, owner)
+
+    /** Attached: the engine plays the link's panel and shows on the unit (Core mode); off: the link's test pattern. */
+    fun attach(on: Boolean) = nativeAttach(handle, on)
+
+    /** Tests: the echo core (its MIDI in back out as USB-MIDI packets, silence). */
+    fun testLoadEcho(): Boolean = nativeTestLoadEcho(handle)
+
+    /** FM1VST's MIDI settings: [keyChannel] (0 any, -1 off, 1..16), [transpose] octaves, key notes to the firmware, the map. */
+    fun setMidi(keyChannel: Int = 0, transpose: Int = 0, keyNotesToFirmware: Boolean = false, useMap: Boolean = true) =
+        nativeSetMidi(handle, keyChannel, transpose, keyNotesToFirmware, useMap)
+
+    /** The core's MIDI out kept for [renderBlocks] (1), or counted and dropped (0). */
+    fun midiOutEnable(on: Int) = nativeMidiOutEnable(handle, on)
+
+    fun setOffline(on: Boolean) = nativeSetOffline(handle, on)
+
+    /**
+     * Tests, with [CLOCK_AUDIO] and [setOffline] on: [count] renders of [frames] at [rate]; the core's MIDI out packets
+     * (USB-MIDI, cin | b0 << 8 | b1 << 16 | b2 << 24) and the audio's RMS and peak into [level] if given.
+     */
+    fun renderBlocks(count: Int, frames: Int = 512, rate: Double = 44100.0, level: DoubleArray? = null): IntArray {
+        val l = DoubleArray(3)
+        val pk = nativeRenderBlocks(handle, count, frames, rate, l)
+        if (level != null && level.size >= 2) {
+            level[0] = if (l[1] > 0) kotlin.math.sqrt(l[0] / l[1]) else 0.0
+            level[1] = l[2]
+        }
+        return pk
+    }
 
     /** Note key 0..26 down or up, as the FM-1 sends it; [vel] 1..127, 0 the default. */
     fun key(key: Int, down: Boolean, vel: Int = 0): Boolean = nativeKey(handle, key, down, vel)
@@ -64,7 +94,13 @@ class RfmEngine : AutoCloseable {
 
         @JvmStatic private external fun nativeScan(dir: String): Int
         @JvmStatic private external fun nativeCores(): String
-        @JvmStatic private external fun nativeCreate(): Long
+        @JvmStatic private external fun nativeCreate(link: Long): Long
+        @JvmStatic private external fun nativeAttach(h: Long, on: Boolean)
+        @JvmStatic private external fun nativeTestLoadEcho(h: Long): Boolean
+        @JvmStatic private external fun nativeSetMidi(h: Long, keyChannel: Int, transpose: Int, keyNotes: Boolean, useMap: Boolean)
+        @JvmStatic private external fun nativeMidiOutEnable(h: Long, on: Int)
+        @JvmStatic private external fun nativeSetOffline(h: Long, on: Boolean)
+        @JvmStatic private external fun nativeRenderBlocks(h: Long, count: Int, frames: Int, rate: Double, level: DoubleArray): IntArray
         @JvmStatic private external fun nativeDestroy(h: Long)
         @JvmStatic private external fun nativeLoad(h: Long, id: String): String
         @JvmStatic private external fun nativeBoot(h: Long, flash: ByteArray?): Boolean
