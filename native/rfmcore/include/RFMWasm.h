@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // Copied from RemoteFM1IOS edf2039 RFMKit/Sources/RFMCore/include/RFMWasm.h; changes: none ("Swift imports it": Kotlin
-// reaches it through rfm_wasm_jni.cpp and rfm_jni.cpp).
+// reaches it through rfm_wasm_jni.cpp and rfm_jni.cpp). Fantasy CFW delta from RemoteFM1IOS 7a7cc49 applied (the
+// folder, the budget, the test C API rfmw_inst_*, rfm_wasm_test_jni.cpp).
 // Imported firmware (M7): .rfm1 files (docs/RFM1-FORMAT.md, version 1), FM-1 firmware compiled to WebAssembly, run by
 // wasm3 behind the engine's core backend (RFMWasmCore.cpp: WasmCore). Each engine that loads one gets its own
 // instance (its own linear memory): no slots, no per-core cap.
@@ -28,6 +29,10 @@ typedef struct {
     uint32_t memory_bytes;      // the module's fixed linear memory
     uint32_t file_size;
     uint32_t load_us;           // one instantiation (parse, link, compile, _initialize, the checks)
+    // a Fantasy CFW (FM1VST docs/VIRTUAL-CARTS.md): its manifest's "virtual"; it uses the RemoteFM1 folder
+    // (rfm1_host_1); what its manifest's "folders" allow ("audio:r code:r data:rw")
+    uint32_t is_virtual, uses_folder;
+    char folders[40];
 } rfmw_info_t;
 
 // the format's every check (section 7 step 1: the magic, the manifest, the imports, the exports, the memory) and one
@@ -45,6 +50,31 @@ int rfmw_sha256(const char *path, char out[65]);
 // rfme_load with an .rfm1 core: the file checked, then a WasmCore made for this engine (and again by each power
 // cycle, from the same bytes). 0: failed (err)
 int rfme_load_wasm(rfme_t *e, const char *path, char *err, uint32_t n);
+
+// ---- the RemoteFM1 folder a Fantasy CFW reads (and writes its data/<id>/ in); NULL: none (its requests end in
+// FS_ENOFOLDER). Any thread; every instance's next request uses it
+void rfmw_set_folder(const char *path);
+// the folder's files changed (fs_changed() moves: a cart rescans)
+void rfmw_folder_changed(void);
+// READs answered with bytes since launch, every Fantasy CFW (diagnostics)
+uint64_t rfmw_folder_reads(void);
+// the memory an instance may have (Android: the app sets it from MemoryBudget.kt before a load; tests too); 0: no check
+void rfmw_set_memory_budget(uint64_t bytes);
+
+// ---- one instance outside an engine, for tests: any export called by name (i32 / i64 arguments), the memory, the
+// file API's answers applied (as before each tick). folder: that folder instead of rfmw_set_folder's
+typedef struct rfmw_inst rfmw_inst;
+rfmw_inst *rfmw_inst_open(const char *path, const char *folder, char *err, uint32_t n);
+void rfmw_inst_close(rfmw_inst *i);
+int rfmw_inst_call(rfmw_inst *i, const char *name, const uint64_t *args, uint32_t nargs, int64_t *ret);
+uint8_t *rfmw_inst_memory(rfmw_inst *i, uint32_t *size);
+void rfmw_inst_apply(rfmw_inst *i);
+// waits until every queued request is answered (1), or the timeout (0); then applies
+int rfmw_inst_settle(rfmw_inst *i, uint32_t timeout_ms);
+// waits as rfmw_inst_settle, without applying (the answers stay out of memory until the next apply)
+int rfmw_inst_wait(rfmw_inst *i, uint32_t timeout_ms);
+void rfmw_inst_bump(rfmw_inst *i);
+void rfmw_inst_tick(rfmw_inst *i, uint32_t ms);
 
 #ifdef __cplusplus
 }

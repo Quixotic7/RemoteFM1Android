@@ -196,6 +196,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         DataChanges.add { main.post { dataGen++; wipedCopy = safety.wipedCopy } }
         DataChanges.add { mirrorSync() }
         mirrorSync()
+        com.quixotic7.remotefm1.folder.RemoteFolderNative.start()       // (the native file API follows the folder)
         com.quixotic7.remotefm1.folder.RemoteFolderHost.refresh(ctx)     // (a Fantasy CFW's RemoteFM1 folder)
         val r = fw.resolveSelection(options.core, CoreRef.fromJson(prefs.getString(KEY_CORE_REF, null)), prefs.getString(KEY_CORE, null))
         selected = r?.key ?: pick(options.core, cores.map { it.getString("id") }) ?: "choralroot"
@@ -448,8 +449,9 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         val err = when (val t = fw.loadTarget(selected)) {
             is FirmwareCenter.LoadTarget.Native -> engine.load(t.id)
             // (a Fantasy CFW) its rules, and its declared memory against what this device can give now, before wasm3
+            // (the native loader checks the memory again against the same budget; the folder set as it is now)
             is FirmwareCenter.LoadTarget.Wasm -> com.quixotic7.remotefm1.firmware.FantasyCfw.refusal(java.io.File(t.path))
-                ?: com.quixotic7.remotefm1.firmware.MemoryBudget.check(ctx, t.path) ?: engine.loadWasm(t.path)
+                ?: com.quixotic7.remotefm1.firmware.MemoryBudget.check(ctx, t.path) ?: loadWasm(t.path)
             null -> "not in the catalog"
         }
         if (err != null) {
@@ -464,6 +466,19 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         booted = selected
         message = listOf(fallbackNote, note).filter { it.isNotEmpty() }.joinToString(" ")
         return true
+    }
+
+    /** an .rfm1 into the engine: the native memory check on this device's budget, the RemoteFM1 folder set */
+    private fun loadWasm(path: String): String? {
+        com.quixotic7.remotefm1.folder.RemoteFolderNative.start()
+        com.quixotic7.remotefm1.folder.RemoteFolderNative.sync()
+        val mb = com.quixotic7.remotefm1.firmware.MemoryBudget
+        com.quixotic7.remotefm1.firmware.Rfm1Native.setMemoryBudget(mb.nativeBudget(mb.budget(ctx)))
+        return try {
+            engine.loadWasm(path)
+        } finally {
+            com.quixotic7.remotefm1.firmware.Rfm1Native.setMemoryBudget(0)
+        }
     }
 
     private fun nameOf(id: String) = fw.core(id)?.name ?: id

@@ -44,11 +44,19 @@ interface RemoteFolder {
  * What the JNI's IO thread calls (static methods; paths as UTF-8 bytes, the C++ has checked them): the folder the user
  * picked, or FS_ENOFOLDER for everything when there is none. [changed] is fs_changed(): it moves when the folder is
  * picked again or forgotten, when the app comes back to the foreground (files may have been added meanwhile) and when
- * the app itself writes into it ([noteChanged]).
+ * the app itself writes into it ([noteChanged]). The native file API isn't polled: [listener] (RemoteFolderNative) is
+ * told when the folder comes or goes and when it changed, and moves its own counter.
  */
 object RemoteFolderHost {
     @Volatile var folder: RemoteFolder? = null
         private set
+
+    /** the native side (RemoteFolderNative), told of every change; null in the JVM tests */
+    interface Listener {
+        fun folderSet(present: Boolean)
+        fun folderChanged()
+    }
+    @Volatile var listener: Listener? = null
     private val counter = AtomicInteger(0)
     private var treeUri: Uri? = null
     /** one thread for the app's own folder work (status, adding files); the JNI calls from its own IO thread */
@@ -67,6 +75,7 @@ object RemoteFolderHost {
         folder = u?.let { SafRemoteFolder(ctx.applicationContext.contentResolver, it) }
         bump()
         publish()
+        listener?.folderSet(folder != null)
     }
 
     /** (tests) a folder of their own; null: none */
@@ -75,6 +84,7 @@ object RemoteFolderHost {
         folder = f
         bump()
         publish()
+        listener?.folderSet(f != null)
     }
 
     /** the status, its location looked up on [io] (a SAF query) */
@@ -88,6 +98,7 @@ object RemoteFolderHost {
     fun noteChanged() {
         folder?.forget()
         bump()
+        listener?.folderChanged()
     }
 
     private fun bump() {

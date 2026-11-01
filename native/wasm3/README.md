@@ -1,7 +1,7 @@
 # wasm3 (vendored)
 
 [wasm3](https://github.com/wasm3/wasm3) v0.5.0, commit 6b8bcb1e07bf26ebef09a7211b0a37a446eafd52, MIT ([LICENSE](LICENSE)),
-copied unchanged from RemoteFM1IOS edf2039 `RFMKit/Sources/CWasm3` (which took it unchanged from FM1VST's
+copied from RemoteFM1IOS edf2039 `RFMKit/Sources/CWasm3` (which took it unchanged from FM1VST's
 `third_party/wasm3`, branch `rfm1-target`, d5f8f64): `source/`'s `.c` and `.h` files. The interpreter RemoteFM1 runs
 imported `.rfm1` firmware in (FM1VST docs/RFM1-FORMAT.md; `native/rfmcore/RFMWasmCore.cpp`).
 
@@ -9,3 +9,21 @@ imported `.rfm1` firmware in (FM1VST docs/RFM1-FORMAT.md; `native/rfmcore/RFMWas
 as a static library with wasm3's release flags (-O3, -fomit-frame-pointer, no stack checks, DEBUG undefined: no
 tracing, no asserts), in debug builds too, as on iOS: its interpreter relies on the optimiser's tail calls. The
 `m3_api_*` files (its own WASI, libc and tracer) are not built; RFMWasmCore.cpp links the format's few WASI stubs itself.
+
+## Local patches
+
+The two from RemoteFM1IOS 7a7cc49 (`RFMKit/Sources/CWasm3/README.md`), applied the same way. First, in
+`source/m3_core.c` `m3_Realloc` (2026-11-01, for Fantasy CFW firmwares of up to 512 MiB): a first allocation
+(`i_ptr == NULL`, a module's linear memory) is `calloc (i_newSize, 1)` with no `memset`, so the system's zero pages are
+handed out lazily and memory a firmware never touches costs no RAM. The whole patch:
+
+```c
+    if (UNLIKELY(i_newSize == i_oldSize)) return i_ptr;
++   if (i_ptr == NULL)
++       return calloc (i_newSize, 1);
+    void * newPtr = realloc (i_ptr, i_newSize);
+```
+
+Second, `source/m3_config.h`: `d_m3MaxDuplicateFunctionImpl` 32 (was 3), the export names wasm3 keeps per function.
+A toolchain that folds identical functions gives one function four or more export names; with 3, wasm3 lost the rest
+and the loader refused the file ("no export rfm1_flash_sync").

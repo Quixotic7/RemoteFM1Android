@@ -224,6 +224,13 @@ object MemoryBudget {
         return budget(mi.availMem, mi.threshold, mi.totalMem, am.largeMemoryClass)
     }
 
+    /**
+     * The native loader's budget for [budget]: it refuses when the declared memory plus 16 MiB is over its budget, so
+     * this gives it max(budget, [ALWAYS]) + 16 MiB and both refuse the same files (up to 32 MiB never); 0 (no check)
+     * when the budget is unknown.
+     */
+    fun nativeBudget(budget: Long): Long = if (budget >= Long.MAX_VALUE / 2) 0 else maxOf(budget, ALWAYS) + (16L shl 20)
+
     /** a load's check: the file's declared memory against the budget now; null: go ahead */
     fun check(ctx: android.content.Context, path: String): String? {
         val mem = FantasyCfw.scan(File(path))?.memoryBytes ?: return null

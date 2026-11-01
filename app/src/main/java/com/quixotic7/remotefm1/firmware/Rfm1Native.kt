@@ -9,6 +9,8 @@ package com.quixotic7.remotefm1.firmware
 data class Rfm1Info(
     val id: String, val name: String, val version: String, val family: String, val license: String,
     val sha256: String, val abi: Int, val flashSize: Int, val memoryBytes: Int, val fileSize: Long, val loadUs: Long,
+    // a Fantasy CFW: its manifest's "virtual"; it imports rfm1_host_1; its "folders" ("audio:r code:r data:rw")
+    val isVirtual: Boolean = false, val usesFolder: Boolean = false, val folders: String = "",
 )
 
 /** the loader, behind an interface so the JVM tests can stand in for it */
@@ -34,8 +36,16 @@ object Rfm1Native : Rfm1Checker {
             family = j.str("family") ?: "", license = j.str("license") ?: "", sha256 = j.str("sha256") ?: "",
             abi = (j.int("abi") ?: 0).toInt(), flashSize = (j.int("flash_size") ?: 0).toInt(),
             memoryBytes = (j.int("memory_bytes") ?: 0).toInt(), fileSize = j.int("file_size") ?: 0,
-            loadUs = j.int("load_us") ?: 0))
+            loadUs = j.int("load_us") ?: 0, isVirtual = j.int("virtual") == 1L, usesFolder = j.int("uses_folder") == 1L,
+            folders = j.str("folders") ?: ""))
     }
+
+    /**
+     * The memory the next instances may have (RFMWasmCore.cpp refuses "needs N MB of memory" above it; 0: no check).
+     * Set from [MemoryBudget] just before a load and cleared after, so a file's check on import or at launch never
+     * depends on the memory free at that moment.
+     */
+    fun setMemoryBudget(bytes: Long) = nativeSetMemoryBudget(bytes)
 
     override fun text(path: String, what: String): String = nativeText(path, what)
 
@@ -45,4 +55,5 @@ object Rfm1Native : Rfm1Checker {
     @JvmStatic private external fun nativeCheck(path: String): String
     @JvmStatic private external fun nativeText(path: String, what: String): String
     @JvmStatic private external fun nativeSha256(path: String): String
+    @JvmStatic private external fun nativeSetMemoryBudget(bytes: Long)
 }

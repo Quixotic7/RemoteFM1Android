@@ -55,3 +55,7 @@ target_compile_definitions(wasm3 PRIVATE NASSERTS)
 target_compile_options(wasm3 PRIVATE -std=gnu11 -O3 -UDEBUG -fomit-frame-pointer -fno-stack-check -fno-stack-protector -w)
 target_sources(rfmcore PRIVATE ${R}/RFMWasmCore.cpp ${R}/rfm_wasm_jni.cpp)
 target_link_libraries(rfmcore PRIVATE wasm3)
+
+# (Fantasy CFW) a Fantasy CFW's file API (RFMFileApi.cpp, from RemoteFM1IOS 7a7cc49), the RemoteFM1 folder over JNI
+# (android/rfm_folder_jni.cpp) and the loader's test C API for the instrumented tests (rfm_wasm_test_jni.cpp)
+target_sources(rfmcore PRIVATE ${R}/RFMFileApi.cpp ${R}/android/rfm_folder_jni.cpp ${R}/rfm_wasm_test_jni.cpp)
