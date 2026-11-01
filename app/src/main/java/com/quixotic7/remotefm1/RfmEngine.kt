@@ -66,6 +66,56 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
     fun renderOffline(frames: Int, rate: Double = 48000.0, buffer: Int = 192): FloatArray? =
         nativeRenderOffline(handle, frames, rate, buffer)
 
+    // ---- the flash image (A2)
+    val flashSize: Int get() = nativeFlashSize(handle)
+
+    /** A copy the clock made (every 30 device s when the flash changed, after [requestFlash], a power cycle's) into
+     *  [out] (flash size bytes); true when there was one. */
+    fun takeFlash(out: ByteArray): Boolean = nativeTakeFlash(handle, out)
+
+    /** Asks the clock for flash_sync and a copy at its next between hook (then [takeFlash]). */
+    fun requestFlash() = nativeRequestFlash(handle)
+
+    /** The clock stopped, flash_sync, the image now into [out], the clock given back; true: done. */
+    fun finalFlash(out: ByteArray): Boolean = nativeFinalFlash(handle, out)
+
+    /** The firmware powered off and on again from its flash (which is then offered to [takeFlash]); null or the error. */
+    fun powerCycle(): String? = nativePowerCycle(handle).ifEmpty { null }
+
+    fun unload() = nativeUnload(handle)
+
+    // ---- the caller's clock (tests: [setClock] CLOCK_CALLER)
+    class Audio(val frames: Long, val rms: Double, val peak: Int, val hash: Long)
+
+    /** [ms] device milliseconds on this thread, the sound measured (rfme_run_ms). */
+    fun run(ms: Int): Audio {
+        val a = DoubleArray(4)
+        nativeRunMs(handle, ms, a)
+        return Audio(a[0].toLong(), a[1], a[2].toInt(), a[3].toLong())
+    }
+
+    /** A panel event as the FM-1 sends it (EV_KEY / EV_BUTTON / EV_ENC, matrix ids). */
+    fun event(type: Int, index: Int, value: Int): Boolean = nativeEvent(handle, type, index, value)
+
+    /** A button by label (B_*) down or up. */
+    fun button(label: Int, down: Boolean): Boolean = nativeMatrixButton(handle, label).let { it >= 0 && event(EV_BUTTON, it, if (down) 1 else 0) }
+
+    /** A knob by role (E_*) turned [detents]. */
+    fun knob(role: Int, detents: Int): Boolean = nativeMatrixEncoder(handle, role).let { it >= 0 && event(EV_ENC, it, detents) }
+
+    /** A parameter's value, null when the core has none by that name; [anyClock]: the clock stopped for the read. */
+    fun param(name: String, anyClock: Boolean = false): Int? =
+        nativeParam(handle, name, anyClock).takeIf { it != Long.MIN_VALUE }?.toInt()
+
+    /** FNV-1a of the LCD as it is now (CALLER or NONE). */
+    val lcdHash: Int get() = nativeLcdHash(handle)
+
+    /** The colours on the LCD last published. */
+    val colours: Int get() = nativeColours(handle)
+
+    /** Tests: what a device disconnect does to the Oboe stream (closed, `dead`, counted). */
+    fun testDisconnect() = nativeTestDisconnect(handle)
+
     /** The LCD (240 x 240 RGBA) into [rgba] when it changed since [have]; returns its number. */
     fun preview(have: Int, rgba: ByteArray): Int = nativePreview(handle, have, rgba)
 
@@ -81,6 +131,15 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         const val CLOCK_AUDIO = 1
         const val CLOCK_TIMER = 2
         const val CLOCK_CALLER = 3
+        // RFMCore.h RFMC_EV_*, RFMEngine.h RFME_B_* / RFME_E_*
+        const val EV_KEY = 1
+        const val EV_BUTTON = 2
+        const val EV_ENC = 3
+        const val B_FX = 0; const val B_SEL = 1; const val B_ENV = 2; const val B_LFO = 3; const val B_EDIT = 4
+        const val B_GLO = 5; const val B_HOME = 6; const val B_SAVE = 7; const val B_ARP = 8; const val B_SEQ = 9
+        const val B_PLAY = 10; const val B_REC = 11; const val B_OCTDN = 12; const val B_OCTUP = 13
+        const val E_SELECT = 0; const val E_ALGO = 1; const val E_PRESETS = 2; const val E_K1 = 3; const val E_K2 = 4
+        const val E_K3 = 5; const val E_K4 = 6
 
         init {
             System.loadLibrary("rfmcore")
@@ -112,5 +171,19 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         @JvmStatic private external fun nativeResetStats(h: Long)
         @JvmStatic private external fun nativeRenderOffline(h: Long, frames: Int, rate: Double, buffer: Int): FloatArray?
         @JvmStatic private external fun nativePreview(h: Long, have: Int, rgba: ByteArray): Int
+        @JvmStatic private external fun nativeFlashSize(h: Long): Int
+        @JvmStatic private external fun nativeTakeFlash(h: Long, out: ByteArray): Boolean
+        @JvmStatic private external fun nativeRequestFlash(h: Long)
+        @JvmStatic private external fun nativeFinalFlash(h: Long, out: ByteArray): Boolean
+        @JvmStatic private external fun nativePowerCycle(h: Long): String
+        @JvmStatic private external fun nativeUnload(h: Long)
+        @JvmStatic private external fun nativeRunMs(h: Long, ms: Int, out: DoubleArray)
+        @JvmStatic private external fun nativeEvent(h: Long, type: Int, index: Int, value: Int): Boolean
+        @JvmStatic private external fun nativeMatrixButton(h: Long, label: Int): Int
+        @JvmStatic private external fun nativeMatrixEncoder(h: Long, role: Int): Int
+        @JvmStatic private external fun nativeParam(h: Long, name: String, anyClock: Boolean): Long
+        @JvmStatic private external fun nativeLcdHash(h: Long): Int
+        @JvmStatic private external fun nativeColours(h: Long): Int
+        @JvmStatic private external fun nativeTestDisconnect(h: Long)
     }
 }

@@ -22,9 +22,16 @@ void rfmo_free(rfmo_t *o);          // stops first
 int rfmo_start(rfmo_t *o, int32_t device_id, char *err, uint32_t n);
 // stops and closes the stream; the engine's clock goes to `clock_after` (RFME_CLOCK_TIMER keeps the core running)
 void rfmo_stop(rfmo_t *o, int clock_after);
+// tests: what a device disconnect does (the stream closed under us, the error callback's count and flag), so the
+// app's reopen path can be tried where no device can be pulled (the emulator)
+void rfmo_test_disconnect(rfmo_t *o);
 
 typedef struct {
     int open, running;
+    int dead;                       // the stream was closed by a disconnect (onErrorAfterClose): reopen it
+    int32_t device_id;              // the device the stream plays on (AudioDeviceInfo.getId)
+    int32_t requested_device;       // the one asked for (0: the default)
+    double latency_ms;              // Oboe's calculateLatencyMillis (-1: unknown)
     int32_t rate, channels, frames_per_burst, buffer_size, buffer_capacity;
     int32_t api;                    // oboe::AudioApi: 1 OpenSL ES, 2 AAudio
     int32_t sharing;                // oboe::SharingMode: 0 exclusive, 1 shared

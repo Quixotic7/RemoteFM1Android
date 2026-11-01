@@ -2,13 +2,17 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 RemoteFM1 contributors
 # The core test on the headless Android emulator (iOS: scripts/sim_coretest.sh): builds the app and its test APK,
-# boots the AVD headless if no emulator runs it (no window, no audio, no snapshot saved), installs, runs CoreTest
-# (ChoralRoot boots through the engine, a key held, 3 s rendered offline through the render-ahead ring, the Oboe
-# stream tried), prints the summary and saves coretest.json and the log under $OUT; shuts down an emulator it booted.
+# boots the AVD headless if no emulator runs it (no window, no audio, no snapshot saved), installs, runs CoreTest (A0:
+# ChoralRoot boots through the engine, a key held, 3 s rendered offline through the render-ahead ring, the Oboe
+# stream tried) and CoresTest (A2: all six cores boot and sound, their render load, the flash files, power cycles,
+# sound off/on, the stream reopened after a disconnect), prints the summary and saves coretest.json and the log
+# under $OUT; shuts down an emulator it booted.
 #
 #   scripts/emu_coretest.sh [AVD]          default RFM_Tablet; NOBUILD=1 skips the build; OUT=... (default
-#                                          build/emu-coretest); SERIAL=emulator-NNNN picks a running emulator
-#   DEVICE=1 SERIAL=<serial> scripts/emu_coretest.sh    the same on a real device (plays 2 s of a quiet note)
+#                                          build/emu-coretest); SERIAL=emulator-NNNN picks a running emulator;
+#                                          TEST=Class[#method] runs one (default CoreTest and CoresTest)
+#   DEVICE=1 SERIAL=<serial> scripts/emu_coretest.sh    the same on a real device (quiet notes on its own speaker,
+#                                                        never a USB sound card)
 #
 # Talks only to the emulator it finds or boots (adb -s emulator-*), or to the one device SERIAL names with DEVICE=1.
 set -euo pipefail
@@ -76,42 +80,71 @@ say "installing on $SERIAL"
 "$ADB" -s "$SERIAL" logcat -c || true
 "$ADB" -s "$SERIAL" shell run-as $PKG rm -f files/coretest.json || true
 
-say "CoreTest"
+CLASSES=$PKG.CoreTest,$PKG.CoresTest
+[ -n "${TEST:-}" ] && CLASSES=$PKG.$TEST
+say "$CLASSES"
 set +e
-"$ADB" -s "$SERIAL" shell am instrument -w -r -e class $PKG.CoreTest $PKG.test/androidx.test.runner.AndroidJUnitRunner \
+"$ADB" -s "$SERIAL" shell am instrument -w -r -e class "$CLASSES" $PKG.test/androidx.test.runner.AndroidJUnitRunner \
     >"$OUT/instrument.txt" 2>&1
 set -e
 "$ADB" -s "$SERIAL" shell run-as $PKG cat files/coretest.json >"$OUT/coretest.json" 2>/dev/null || true
-"$ADB" -s "$SERIAL" logcat -d -s RFMCoreTest:I AndroidRuntime:E TestRunner:* DEBUG:* >"$OUT/logcat.txt" 2>&1 || true
+"$ADB" -s "$SERIAL" logcat -d -s RFMCoreTest:I RFMFlash:I RFMAudio:I AndroidRuntime:E TestRunner:* DEBUG:* >"$OUT/logcat.txt" 2>&1 || true
 
 python3 - "$OUT/coretest.json" <<'EOF'
 import json, sys
 try:
-    r = json.load(open(sys.argv[1]))
+    all = json.load(open(sys.argv[1]))
 except Exception as e:
     print('no coretest.json:', e)
     sys.exit(0)
-o = r.get('oboe', {})
-s = o.get('stream', {})
-print(f"cores     {r.get('cores_found')}: {', '.join(r.get('cores', []))}  {r.get('scan_errors') or ''}")
-print(f"boot      load {r.get('load_ms', 0):.1f} ms, boot {r.get('boot_ms', 0):.1f} ms {r.get('load_error') or ''}")
-print(f"before    rms {r.get('before_key_rms', 0):.5f} (1 s, no key; {r.get('before_key_wall_ms', 0):.0f} ms wall)")
-print(f"key held  rms {r.get('held_rms', 0):.5f}  peak {r.get('held_peak', 0):.4f}  first sound {r.get('first_sound_ms', -1):.1f} ms"
-      f"  (3 s in {r.get('held_wall_ms', 0):.0f} ms: x{r.get('realtime_factor', 0):.1f} real time)")
-print(f"render    {r.get('renders')} renders of 192, avg {r.get('render_avg_us')} us, max {r.get('render_max_us')} us;"
-      f" core thread avg {r.get('core_avg_us')} us, max {r.get('core_max_us')} us, load {r.get('core_load_pct')} %,"
-      f" frame() max {r.get('frame_max_us')} us, priority {r.get('realtime')}")
-print(f"ring      target {r.get('ring_target')}, latency {r.get('latency_frames')} frames")
-if o.get('start_error'):
-    print(f"oboe      failed: {o.get('start_error')}  ({s.get('error')})")
-else:
-    print(f"oboe      {s.get('api')} {s.get('rate')} Hz x{s.get('channels')} {s.get('sharing')}, burst {s.get('frames_per_burst')},"
-          f" buffer {s.get('buffer_size')}/{s.get('buffer_capacity')}, callbacks {s.get('callbacks')} (max {s.get('max_frames')} frames),"
-          f" rms {s.get('rms', 0):.5f}, xruns {s.get('xruns')}; engine underruns {o.get('engine_underruns')},"
-          f" render avg {o.get('render_avg_us')} us, latency {o.get('latency_frames')} frames")
-print(f"reload    {r.get('reload_error') or 'ok'}, rms {r.get('reload_rms', 0):.5f}; copies in use {r.get('copies_in_use')},"
-      f" retired (image stayed loaded) {r.get('copies_retired')}")
-print('PASS' if r.get('pass') else 'FAIL')
+def stream(s):
+    return (f"{s.get('api')} {s.get('rate')} Hz x{s.get('channels')} {s.get('sharing')} (perf {s.get('performance')}), device {s.get('device_id')},"
+            f" burst {s.get('frames_per_burst')}, buffer {s.get('buffer_size')}/{s.get('buffer_capacity')},"
+            f" latency {s.get('latency_ms') or -1:.1f} ms, callbacks {s.get('callbacks')}, rms {s.get('rms', 0):.5f}, xruns {s.get('xruns')}")
+r = all.get('a0')
+if r:
+    o = r.get('oboe', {})
+    s = o.get('stream', {})
+    print(f"a0          cores {r.get('cores_found')}: {', '.join(r.get('cores', []))}  {r.get('scan_errors') or ''}")
+    print(f"            load {r.get('load_ms', 0):.1f} ms, boot {r.get('boot_ms', 0):.1f} ms; key held rms {r.get('held_rms', 0):.5f},"
+          f" first sound {r.get('first_sound_ms', -1):.1f} ms, x{r.get('realtime_factor', 0):.0f} real time;"
+          f" core thread avg {r.get('core_avg_us')} us, load {r.get('core_load_pct')} %, priority {r.get('realtime')}")
+    if o.get('start_error'):
+        print(f"            oboe failed: {o.get('start_error')}  ({s.get('error')})")
+    else:
+        print(f"            oboe {stream(s)}; engine underruns {o.get('engine_underruns')}, latency {o.get('latency_frames')} frames")
+    print(f"            reload {r.get('reload_error') or 'ok'}, rms {r.get('reload_rms', 0):.5f}; retired {r.get('copies_retired')}")
+e, l = all.get('each_core', {}), all.get('render_load', {})
+ids = ['choralroot', 'felucca', 'fizz', 'saadet', 'boardwalk', 'loom']
+if e or l:
+    print("core        boot ms  key rms   peak   colours | ring rms  core avg/max us  load %  frame() max us  x real time  underruns")
+    for i in ids:
+        a, b = e.get(i, {}), l.get(i, {})
+        print(f"{i:<11} {a.get('boot_ms', 0):7.1f}  {a.get('key_rms', 0):.5f} {a.get('key_peak', 0):6} {a.get('colours', 0):7} |"
+              f" {b.get('rms', 0):.5f}  {b.get('core_avg_us', 0):6}/{b.get('core_max_us', 0):<6}  {b.get('core_load_pct', 0):6}"
+              f"  {b.get('frame_max_us', 0):14}  {b.get('x_realtime', 0):10.1f}  {b.get('underruns', 0)}")
+for k, what in [('fizz', 'demo_peak'), ('boardwalk', 'tune_peak'), ('loom', 'kicks_peak'), ('saadet', 'colours')]:
+    if k in all:
+        print(f"{k:<11} {what} {all[k].get(what)}")
+if 'choralroot_flash' in all:
+    c = all['choralroot_flash']
+    print(f"flash       choralroot.bin {c.get('file_bytes')} B, tempo 121 kept; damaged file: {c.get('damaged_note')}")
+if 'power_cycle' in all:
+    p = all['power_cycle']
+    print(f"power cycle {p.get('message')}; " + ", ".join(f"{i} {p.get(i, {}).get('bytes_changed_by_the_reboot')} B changed" for i in ids))
+if 'sound_switch' in all:
+    w = all['sound_switch']
+    print(f"sound       timer -> audio -> timer: device ms {w.get('dev_ms_timer')} -> {w.get('dev_ms_end')}, tempo kept"
+          + (f"; {stream(w['stream'])}" if 'stream' in w else f" (no stream: {w.get('start_error')})"))
+if 'oboe_reopen' in all:
+    o = all['oboe_reopen']
+    if 'first' in o:
+        print(f"stream      {stream(o['first'])}")
+    if 'again' in o:
+        print(f"reopen      after a disconnect: {stream(o['again'])}; engine underruns {o.get('engine_underruns')}, ring {o.get('ring_target')}")
+    print(f"outputs     {o.get('outputs')}")
+for k, v in all.items():
+    print(f"  {k:<22} {'PASS' if v.get('pass') else 'FAIL'}")
 EOF
 grep -E "^INSTRUMENTATION_(RESULT|CODE|FAILED)|^OK |^FAILURES|Tests run" "$OUT/instrument.txt" | tail -5
 echo "saved: $OUT/coretest.json, instrument.txt, logcat.txt"

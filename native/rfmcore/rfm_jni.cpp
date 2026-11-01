@@ -5,7 +5,9 @@
 // Status comes back as JSON text.
 #include <jni.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -261,6 +263,8 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStatus(JN
     j.num("loaded", s.loaded);
     j.num("booted", s.booted);
     j.num("halted", s.halted);
+    j.num("halt_code", s.halt_code);
+    j.num("slot", s.slot);
     j.num("attached", s.attached);
     j.num("clock", s.clock);
     j.str("core_id", s.core_id);
@@ -294,9 +298,15 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStatus(JN
     j.num("realtime", s.realtime);
     j.num("cpu_pct", s.cpu_pct);
     j.num("flash_size", s.flash_size);
+    j.num("flash_dirty", s.flash_dirty);
+    j.num("flash_copies", s.flash_copies);
     Json a;
     a.num("open", o.open);
     a.num("running", o.running);
+    a.num("dead", o.dead);
+    a.num("device_id", o.device_id);
+    a.num("requested_device", o.requested_device);
+    a.num("latency_ms", o.latency_ms);
     a.num("rate", o.rate);
     a.num("channels", o.channels);
     a.num("frames_per_burst", o.frames_per_burst);
@@ -368,6 +378,116 @@ JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativePreview(JNIE
     if (seq && seq != (uint32_t)have && rgba && env->GetArrayLength(rgba) >= (jsize)buf.size())
         env->SetByteArrayRegion(rgba, 0, (jsize)buf.size(), reinterpret_cast<const jbyte *>(buf.data()));
     return (jint)seq;
+}
+
+// ---- A2: the flash image, the power cycle, and the caller's clock for tests
+
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeFlashSize(JNIEnv *, jclass, jlong p)
+{
+    return (jint)rfme_flash_size(host(p)->e);
+}
+
+// a copy the clock made (every 30 device s when dirty, after a request, a power cycle's) into out; true: there was one
+JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTakeFlash(JNIEnv *env, jclass, jlong p, jbyteArray out)
+{
+    const jsize n = out ? env->GetArrayLength(out) : 0;
+    std::vector<uint8_t> buf((size_t)n);
+    if (!n || !rfme_take_flash(host(p)->e, buf.data(), (uint32_t)n))
+        return JNI_FALSE;
+    env->SetByteArrayRegion(out, 0, n, reinterpret_cast<const jbyte *>(buf.data()));
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeRequestFlash(JNIEnv *, jclass, jlong p)
+{
+    rfme_request_flash(host(p)->e);
+}
+
+// the clock stopped, flash_sync, the image now into out, the clock given back
+JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeFinalFlash(JNIEnv *env, jclass, jlong p, jbyteArray out)
+{
+    const jsize n = out ? env->GetArrayLength(out) : 0;
+    std::vector<uint8_t> buf((size_t)n);
+    if (!n || !rfme_final_flash(host(p)->e, buf.data(), (uint32_t)n))
+        return JNI_FALSE;
+    env->SetByteArrayRegion(out, 0, n, reinterpret_cast<const jbyte *>(buf.data()));
+    return JNI_TRUE;
+}
+
+// "" ok, else the error
+JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativePowerCycle(JNIEnv *env, jclass, jlong p)
+{
+    char err[256] = {};
+    const int ok = rfme_power_cycle(host(p)->e, err, sizeof err);
+    return utf(env, ok ? "" : (err[0] ? err : "power cycle failed"));
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeUnload(JNIEnv *, jclass, jlong p)
+{
+    rfme_unload(host(p)->e);
+}
+
+// RFME_CLOCK_CALLER: `ms` device ms on this thread; out = [frames, rms, peak (int16), hash]
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeRunMs(JNIEnv *env, jclass, jlong p, jint ms,
+                                                                           jdoubleArray out)
+{
+    rfme_audio_t a{};
+    rfme_run_ms(host(p)->e, (uint32_t)ms, &a);
+    if (out && env->GetArrayLength(out) >= 4) {
+        const jdouble v[4] = {(double)a.frames, a.rms, (double)a.peak, (double)a.hash};
+        env->SetDoubleArrayRegion(out, 0, 4, v);
+    }
+}
+
+// a panel event (RFMC_EV_*: matrix ids)
+JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeEvent(JNIEnv *, jclass, jlong p, jint type,
+                                                                               jint index, jint value)
+{
+    return rfme_event(host(p)->e, (uint8_t)type, (uint8_t)index, (int16_t)value) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeMatrixButton(JNIEnv *, jclass, jlong p, jint label)
+{
+    return rfme_matrix_button(host(p)->e, label);
+}
+
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeMatrixEncoder(JNIEnv *, jclass, jlong p, jint role)
+{
+    return rfme_matrix_encoder(host(p)->e, role);
+}
+
+// a parameter's value (Long.MIN_VALUE: none); anyClock: rfme_param_read (the clock stopped for it), else
+// rfme_param_get (CALLER or NONE only)
+JNIEXPORT jlong JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeParam(JNIEnv *env, jclass, jlong p, jstring name,
+                                                                            jboolean anyClock)
+{
+    int32_t v = 0;
+    const std::string n = jstr(env, name);
+    const int ok = anyClock ? rfme_param_read(host(p)->e, n.c_str(), &v) : rfme_param_get(host(p)->e, n.c_str(), &v);
+    return ok ? (jlong)v : (jlong)INT64_MIN;
+}
+
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeLcdHash(JNIEnv *, jclass, jlong p)
+{
+    return (jint)rfme_lcd_hash(host(p)->e);
+}
+
+// the colours on the LCD last published
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeColours(JNIEnv *, jclass, jlong p)
+{
+    std::vector<uint8_t> buf(240 * 240 * 4);
+    if (!rfme_preview(host(p)->e, 0, buf.data()))
+        return 0;
+    std::vector<uint32_t> px(240 * 240);
+    for (size_t i = 0; i < px.size(); i++)
+        px[i] = (uint32_t)buf[i * 4] << 16 | (uint32_t)buf[i * 4 + 1] << 8 | buf[i * 4 + 2];
+    std::sort(px.begin(), px.end());
+    return (jint)(std::unique(px.begin(), px.end()) - px.begin());
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTestDisconnect(JNIEnv *, jclass, jlong p)
+{
+    rfmo_test_disconnect(host(p)->out);
 }
 
 } // extern "C"

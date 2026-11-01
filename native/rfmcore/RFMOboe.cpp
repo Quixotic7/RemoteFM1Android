@@ -68,10 +68,13 @@ public:
         return oboe::DataCallbackResult::Continue;
     }
 
+    // a disconnect (the device gone, the default route changed): Oboe has closed the stream; the app's main thread
+    // sees `dead` and reopens it on the new default (AppModel), as iOS restarts its engine on a route change
     void onErrorAfterClose(oboe::AudioStream *, oboe::Result r) override
     {
-        disconnects_.fetch_add(1, std::memory_order_relaxed);   // (A2: reopen on the new default device)
+        disconnects_.fetch_add(1, std::memory_order_relaxed);
         lastError_.store((int32_t)r, std::memory_order_relaxed);
+        dead_.store(true, std::memory_order_release);
     }
 
     rfme_t *e_;
@@ -80,6 +83,7 @@ public:
     std::atomic<uint64_t> frames_{0};
     std::atomic<float> rms_{0}, peak_{0};
     std::atomic<int32_t> lastError_{0};
+    std::atomic<bool> dead_{false};
     double winSum_ = 0;                 // (the callback's)
     uint32_t winFrames_ = 0;
     float winPeak_ = 0;
@@ -92,6 +96,8 @@ struct rfmo {
     std::shared_ptr<Output> cb;
     std::shared_ptr<oboe::AudioStream> stream;
     int32_t lastError = 0;
+    int32_t requested = 0;
+    uint32_t disconnectsBefore = 0;     // (kept across reopens: the count is the session's)
     char error[96] = {};
 };
 
@@ -124,7 +130,10 @@ int rfmo_start(rfmo_t *o, int32_t device_id, char *err, uint32_t n)
         putErr(err, n, "already playing");
         return 0;
     }
+    if (o->cb)
+        o->disconnectsBefore += o->cb->disconnects_.load();
     o->cb = std::make_shared<Output>(o->e);
+    o->requested = device_id;
     oboe::AudioStreamBuilder b;
     b.setDirection(oboe::Direction::Output)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
@@ -174,25 +183,43 @@ void rfmo_stop(rfmo_t *o, int clock_after)
         rfme_set_clock(o->e, clock_after);
 }
 
+void rfmo_test_disconnect(rfmo_t *o)
+{
+    if (!o->stream || !o->cb)
+        return;
+    o->stream->stop();
+    o->stream->close();
+    o->cb->onErrorAfterClose(o->stream.get(), oboe::Result::ErrorDisconnected);
+}
+
 void rfmo_status(rfmo_t *o, rfmo_status_t *st)
 {
     std::memset(st, 0, sizeof *st);
     st->last_error = o->lastError;
+    st->requested_device = o->requested;
+    st->latency_ms = -1;
+    st->disconnects = o->disconnectsBefore;
     std::snprintf(st->error, sizeof st->error, "%s", o->error);
     if (o->cb) {
         st->callbacks = o->cb->callbacks_.load();
         st->frames = o->cb->frames_.load();
         st->max_frames = o->cb->maxFrames_.load();
-        st->disconnects = o->cb->disconnects_.load();
+        st->disconnects += o->cb->disconnects_.load();
+        st->dead = o->cb->dead_.load(std::memory_order_acquire) ? 1 : 0;
         st->rms = o->cb->rms_.load();
         st->peak = o->cb->peak_.load();
         if (const int32_t e = o->cb->lastError_.load())
             st->last_error = e;
     }
     oboe::AudioStream *s = o->stream.get();
-    if (!s)
+    if (!s) {
+        st->dead = 0;
         return;
+    }
     st->open = 1;
+    st->device_id = s->getDeviceId();
+    if (st->dead)                       // (closed: only what was read at open is kept)
+        return;
     st->running = s->getState() == oboe::StreamState::Started;
     st->rate = s->getSampleRate();
     st->channels = s->getChannelCount();
@@ -204,6 +231,8 @@ void rfmo_status(rfmo_t *o, rfmo_status_t *st)
     st->performance = (int32_t)s->getPerformanceMode();
     const oboe::ResultWithValue<int32_t> x = s->getXRunCount();
     st->xruns = x ? x.value() : -1;
+    const oboe::ResultWithValue<double> l = s->calculateLatencyMillis();
+    st->latency_ms = l ? l.value() : -1;
 }
 
 } // extern "C"

@@ -3,7 +3,6 @@
 package com.quixotic7.remotefm1
 
 import android.os.SystemClock
-import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONArray
@@ -14,29 +13,23 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.File
 
 /**
- * A0's core test: ChoralRoot from the APK's native library folder boots through the engine, plays after a key goes
+ * A0's core test (A2's per-core cases are CoresTest): ChoralRoot from the APK's native library folder boots through the engine, plays after a key goes
  * down (3 s rendered offline through the render-ahead ring), and the Oboe stream is tried. Every number goes into
- * files/coretest.json (scripts/emu_coretest.sh prints it) and the log (tag RFMCoreTest).
+ * files/coretest.json under "a0" (scripts/emu_coretest.sh prints it) and the log (tag RFMCoreTest).
  */
 @RunWith(AndroidJUnit4::class)
 class CoreTest {
     private val ctx = InstrumentationRegistry.getInstrumentation().targetContext
     private val result = JSONObject()
 
-    private fun save() {
-        File(ctx.filesDir, "coretest.json").writeText(result.toString(2))
-        Log.i(TAG, result.toString())
-    }
-
     @Test
     fun choralRootBootsAndPlays() {
         try {
             run()
         } finally {
-            save()
+            CoresTest.save("a0", result)
         }
     }
 
@@ -109,10 +102,13 @@ class CoreTest {
             assertEquals(1, s.getInt("booted"))
             assertTrue("held RMS $rms", rms > 0.0)
 
-            // the Oboe stream for 2 s with the key held (the emulator may have no audio device)
+            // the Oboe stream for 2 s with the key held (the emulator may have no audio device; a real device plays
+            // on its own speaker, never on a USB sound card such as an FM-1's)
             val audio = JSONObject()
             e.resetStats()
-            val aerr = e.startAudio()
+            val speaker = CoresTest.speakerId(ctx)
+            audio.put("device_asked", speaker)
+            val aerr = e.startAudio(speaker)
             audio.put("start_error", aerr ?: "")
             if (aerr == null) {
                 e.key(KEY, true, 100)

@@ -3,12 +3,18 @@
 An Android phone and tablet host for FM-1 firmware cores, the port of RemoteFM1 for iOS (`../RemoteFM1IOS`). See
 [PLAN.md](PLAN.md) for the design and the milestones.
 
-Status: A1 (the FM-1 link), verified on libremotefm1's fake unit; the real FM-1 test is
+Status: A2 (cores, sound, flash files) built and verified on the headless emulator; the tablet and the real FM-1's
+USB audio are still to be tried. A1 (the FM-1 link) verified on libremotefm1's fake unit; the real FM-1 test is
 [docs/A1-DEVICE-TEST.md](docs/A1-DEVICE-TEST.md). The APK carries the six built-in cores (ChoralRoot 0.26.1, Felucca
 1.6.1, FIZZ 0.12.0-beta.12, Saadet 0.1.1, Boardwalk 0.9, LOOM-8 0.9.3), the engine and the FM-1 link copied from the
 iOS app, an Android MIDI back end (AMidi) for libremotefm1, USB and Bluetooth LE MIDI discovery, a Bluetooth page,
 the main page (sound source, Pattern / Core mode, the core, the sound), Diagnostics (as iOS's) and a foreground
-service. No faceplate yet (A3), no flash files (A2: a core boots fresh).
+service. Each core's memory is kept in `files/cores/<id>.bin` as on iOS (safe writes, `<id>.bin.prev`, the sidecar
+`<id>.json` with iOS's fields), saved when iOS saves (the clock's copy every 30 device s when the flash changed, the
+app going to the background, Pattern mode, a core switch, Restart, a firmware's own reboot, the service stopping);
+Restart firmware (a power cycle from the flash); the audio output picked from Android's outputs (Oboe device id), a
+note when the sound goes to a USB sound card, the stream reopened after a disconnect or when the picked output goes.
+No faceplate yet (A3).
 
 ## Layout
 
@@ -19,12 +25,15 @@ service. No faceplate yet (A3), no flash files (A2: a core boots fresh).
     and handed to the native back end; `Fm1Candidate.kt`: the FM-1 candidate rule, the device description and naming,
     `ReconnectPolicy` (pure Kotlin); `LinkModels.kt`: LinkState, UnitHello, LinkStats, PanelEvent (Models.swift);
     `BleScanner.kt`: the BLE-MIDI scan; `AppModel.kt`: the process-wide model (link, engine, source, mode, core,
-    sound, reconnect); `PlaybackService.kt`: the foreground service; `MainActivity.kt`: the main, Diagnostics and
-    Bluetooth pages; `Levels.kt`: audio levels.
+    sound, reconnect, the flash's save points, the audio output and its reopening); `FlashFile.kt`: safe flash
+    writes, `.prev`, the sidecar (pure Kotlin); `CoreFlash.kt`: a core's flash file read at boot, the clock's copies
+    written, save now / stopped, the power cycle; `AudioOutput.kt`: Android's outputs (`AudioOutputs`), the route
+    rules (`AudioRoute`, pure); `PlaybackService.kt`: the foreground service; `MainActivity.kt`: the main,
+    Diagnostics and Bluetooth pages; `Levels.kt`: audio levels.
   - `src/debug/`: `FakeFm1Service`, a virtual MIDI device "RemoteFM1 Fake FM-1" with the fake unit behind it (debug
     builds only; disabled unless a test or the `virtual` launch extra enables it).
-  - `src/test`: JVM tests (`Fm1CandidateTest`, `ReconnectPolicyTest`, `LinkModelsTest`, `LevelsTest`);
-    `src/androidTest`: `CoreTest` (A0) and `LinkTest` (A1).
+  - `src/test`: JVM tests (`Fm1CandidateTest`, `ReconnectPolicyTest`, `LinkModelsTest`, `LevelsTest`,
+    `FlashFileTest`, `AudioRouteTest`); `src/androidTest`: `CoreTest` (A0), `CoresTest` (A2) and `LinkTest` (A1).
 - `native/`: the app's native library `librfmcore.so` (`native/CMakeLists.txt`, built by Gradle's
   `externalNativeBuild`): libremotefm1 compiled in place from `vendor/RemoteFM1/host/src` (portable C99), and
   `native/rfmcore/`: the engine copied from RemoteFM1IOS (each file's header says from which commit and what
@@ -96,8 +105,15 @@ runs it, and shuts down an emulator it booted; it only talks to `emulator-*` ser
 
 `CoreTest` scans the cores, loads and boots ChoralRoot, renders 1 s with no key and 3 s with a key held through the
 render-ahead ring (offline: each render waits for the core thread), plays 2 s through the Oboe stream, then loads
-ChoralRoot again (the old copy unloaded) and plays. It prints the summary and saves `coretest.json`, the
-instrumentation output and the log under `$OUT`. On a real device (it plays 2 s of a quiet note):
+ChoralRoot again (the old copy unloaded) and plays. `CoresTest` (A2, from iOS's CoreTests) runs every core on the
+caller's clock (boots, draws, a held D4 sounds; FIZZ's demo after PLAY, Boardwalk's attract tune and PLAY/HOME,
+LOOM-8's written kicks, Saadet's page), measures each core's render load through the ring (2 s, a key held), saves
+ChoralRoot's tempo and Felucca's palette through `CoreFlash` into files and boots them back (and a damaged file from
+`.prev`), powers ChoralRoot on again after its own reboot (exit 0) with the tempo kept, power cycles every core
+(the image kept bit for bit), switches the sound off and on (the core's state kept) and reopens the Oboe stream after
+a disconnect (a test hook: the emulator can't add or remove an audio device). It prints the summary and saves
+`coretest.json` (one object per test), the instrumentation output and the log under `$OUT`; `TEST=CoresTest` or
+`TEST=CoresTest#method` runs one. On a real device (quiet notes on its own speaker, never a USB sound card):
 
     DEVICE=1 SERIAL=<adb serial> OUT=build/tablet-coretest scripts/emu_coretest.sh
 
@@ -184,6 +200,11 @@ v0.6.2's engine; the seven tests pass either way.)
 | `scripts/build_cores.sh` | `scripts/build_cores_android.sh` | NDK toolchain, one library per core |
 | `scripts/sim_coretest.sh` | `scripts/emu_coretest.sh` | |
 | `RFMKit/Sources/RFMKit/CorePlayer.swift` (core, audio, mode) | `app/.../RfmEngine.kt`, `AppModel.kt` (A1's part of it) | |
+| `CorePlayer.swift` (the flash: boot read, saveNow, saveStopped, takeFlash, powerCycle, refresh) | `app/.../CoreFlash.kt`, `AppModel.kt` (when it saves) | A2 |
+| `RFMKit/Sources/RFMKit/FlashHistory.swift` (`FlashFile`) | `app/.../FlashFile.kt` | A2; `FlashHistory` (the safety copies) is A5 |
+| `RFMKit/Sources/RFMKit/AudioRoute.swift`, `CorePlayer.swift` (route change, audioConfigurationChanged) | `app/.../AudioOutput.kt`, `native/rfmcore/RFMOboe.cpp` (disconnect) | own picker (Android has no route picker) |
+| `RFMKit/Tests/RFMKitTests/CoreTests.swift` | `app/src/androidTest/.../CoresTest.kt` | A2 |
+| `FlashHistoryTests.swift` (FlashFile cases) | `app/src/test/.../FlashFileTest.kt` | |
 
 ## Licence
 

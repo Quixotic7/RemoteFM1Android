@@ -24,6 +24,12 @@ import android.util.Log
 class PlaybackService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
+    // the service stops (the sound off, Stop, the system): the flash saved (CorePlayer's stop())
+    override fun onDestroy() {
+        AppModel.peek()?.didEnterBackground()
+        super.onDestroy()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             AppModel.peek()?.shutdown()

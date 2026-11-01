@@ -5,6 +5,10 @@ A1 built and verified on the fake unit (14 link tests pass on the emulator and t
 Android's MIDI service with a virtual FM-1 over AMidi); its "done when" waits for the real FM-1 test
 (docs/A1-DEVICE-TEST.md). A1 also brought forward from A2/A6: Core mode on the link with the core picker and sound
 (no flash files yet), the foreground service, TOUCH and TRS MIDI in (the engine had them).
+A2 built and verified on the headless emulator (2026-11-01): the flash files (iOS's FlashFile: safe writes, `.prev`,
+the sidecar; saved when iOS's CorePlayer saves), Restart, the audio output picker and the stream reopened on a
+disconnect, all six cores tested (`CoresTest`, 11 tests; JVM: `FlashFileTest`, `AudioRouteTest`). Its "done when"
+waits for the tablet and the real FM-1 (ChoralRoot heard through the FM-1's USB audio, underruns 0 on the tablet).
 
 Owner's answers (2026-11-01): install the Android tooling (yes); test device: the owner's Samsung Galaxy Tab A9+
 (SM-X210, Android 16 / API 36, arm64, 1200x1920; adb serial R95Y906QALT; Samsung's Auto Blocker must be off for adb and

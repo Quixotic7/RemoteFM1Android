@@ -2,8 +2,9 @@
 // Copyright (C) 2026 RemoteFM1 contributors
 // The app's one model (process-wide, outlives the activity; the foreground service keeps the process): the FM-1 link
 // and the engine on it, the sound source, the mode and the core. A1's part of RemoteFM1IOS's RemoteController (the
-// link's state read ~15 times a second) and CorePlayer (Pattern vs Core mode, the core picker, the sound). The flash
-// is not kept yet (A2): a core boots fresh.
+// link's state read ~15 times a second) and CorePlayer (Pattern vs Core mode, the core picker, the sound). A2: each
+// core's flash kept (CoreFlash: files/cores/<id>.bin, saved when iOS saves), Restart (a power cycle), the audio
+// output picked from Android's list and the stream reopened when its device goes (AudioOutputs, AudioRoute).
 package com.quixotic7.remotefm1
 
 import android.Manifest
@@ -23,6 +24,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import org.json.JSONObject
+import java.io.File
 import java.nio.ByteBuffer
 
 /** How the app was launched (adb: `am start -n .../.MainActivity --ez fake true`; RemoteFM1IOS's -fake / -fakeble). */
@@ -61,6 +63,8 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     val link = RfmLink(backend, virtualName = if (options.virtual) Fm1Candidate.VIRTUAL_NAME else "")
     val engine = RfmEngine(link)
     val cores: List<JSONObject>
+    val flash = CoreFlash(engine, File(ctx.filesDir, "cores")) { id -> cores.firstOrNull { it.getString("id") == id }?.getString("version") }
+    val outputs = AudioOutputs(ctx) { outputsChanged(it) }
 
     // ---- what the UI shows (Compose state, written on the main thread)
     var source by mutableStateOf(Source.FM1)
@@ -95,6 +99,18 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         private set
     var message by mutableStateOf("")
         private set
+    /** the output picked (an AudioDeviceInfo id; 0: the system default) */
+    var requestedOutput by mutableIntStateOf(0)
+        private set
+    var outputList by mutableStateOf<List<AudioOut>>(emptyList())
+        private set
+    var routeChanges by mutableIntStateOf(0)
+        private set
+    var audioRestarts by mutableIntStateOf(0)
+        private set
+    /** the selection asked for (a launch extra or the saved one) is not in this build: what was taken instead */
+    var fallbackNote = ""
+        private set
     var midiEntries by mutableStateOf<List<RfmMidi.Entry>>(emptyList())
         private set
     var bleConnecting by mutableStateOf(false)
@@ -115,8 +131,11 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         RfmEngine.scan(ctx.applicationInfo.nativeLibraryDir)
         val a = RfmEngine.cores().getJSONArray("cores")
         cores = (0 until a.length()).map { a.getJSONObject(it) }.sortedBy { ORDER.indexOf(it.getString("id")).let { i -> if (i < 0) 99 else i } }
-        selected = (options.core ?: prefs.getString(KEY_CORE, null))?.takeIf { id -> cores.any { it.getString("id") == id } }
-            ?: cores.firstOrNull()?.getString("id") ?: "choralroot"
+        val wanted = options.core ?: prefs.getString(KEY_CORE, null)
+        selected = pick(wanted, cores.map { it.getString("id") }) ?: "choralroot"
+        if (wanted != null && wanted != selected) fallbackNote = "$wanted is not in this build: ${nameOf(selected)} instead"
+        if (options.core != null) prefs.edit().putString(KEY_CORE, selected).apply()     // (a launch extra is remembered too)
+        outputList = outputs.list
         engine.setMidi()
         enableVirtual(options.virtual)                      // (listed to other apps only when asked for)
         RfmMidi.start(ctx, link.let { if (options.virtual) Fm1Candidate.VIRTUAL_NAME else "" })
@@ -160,6 +179,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
             mode = m
             stopAudio()
             engine.setClock(RfmEngine.CLOCK_NONE)
+            flash.saveStopped()
             engine.attach(false)
         }
         prefs.edit().putString(KEY_MODE, if (mode == Mode.CORE) "core" else "pattern").apply()
@@ -170,10 +190,10 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         if (cores.none { it.getString("id") == id }) return
         selected = id
         prefs.edit().putString(KEY_CORE, id).apply()
+        if (id != booted) fallbackNote = ""
         if (mode == Mode.CORE) {
             val sound = soundOn
             stopAudio()
-            booted = null
             if (!bootSelected()) useMode(Mode.PATTERN) else {
                 soundOn = sound
                 applyClock()
@@ -198,25 +218,84 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         if (source == Source.FM1) link.start()
     }
 
+    /** Restart: the firmware powered off and on again from its flash (iOS CorePlayer.powerCycle) */
+    fun restartFirmware() {
+        if (booted == null) return
+        val err = flash.powerCycle()
+        if (err != null) {
+            booted = null
+            message = "restart failed: $err"
+        } else {
+            message = ""
+        }
+    }
+
+    /** the app goes to the background (MainActivity.onStop): the flash saved now, the clock left running */
+    fun didEnterBackground() {
+        if (booted == null) return
+        val clock = engine.status().optInt("clock")
+        flash.saveNow(main, clock == RfmEngine.CLOCK_AUDIO || clock == RfmEngine.CLOCK_TIMER) { ok ->
+            Log.i(TAG, "background: flash ${if (ok) "saved" else "not saved"}")
+        }
+    }
+
+    /** the output to play on (0: the system default); the stream reopened on it when the sound is on */
+    fun chooseOutput(id: Int) {
+        requestedOutput = id
+        if (mode == Mode.CORE && soundOn) restartAudio("output picked")
+    }
+
+    private fun outputsChanged(list: List<AudioOut>) {
+        outputList = list
+        routeChanges++
+        val a = engine.status().getJSONObject("audio")
+        val present = list.map { it.id }
+        if (requestedOutput != 0 && requestedOutput !in present) requestedOutput = 0
+        when (AudioRoute.action(mode == Mode.CORE && soundOn, a.optInt("open") != 0, a.optInt("dead") != 0,
+                                a.optInt("requested_device"), present)) {
+            AudioRoute.Action.RESTART -> restartAudio("output gone")
+            else -> {}
+        }
+    }
+
+    // a new stream on the device now wanted, at its rate and burst (the engine learns the new buffer size again):
+    // iOS's audioConfigurationChanged
+    private fun restartAudio(why: String) {
+        if (mode != Mode.CORE || !soundOn) return
+        audioRestarts++
+        Log.i(TAG, "audio: reopening the stream ($why)")
+        engine.setClock(RfmEngine.CLOCK_TIMER)
+        stopAudio()
+        applyClock()
+    }
+
     private fun bootSelected(): Boolean {
         if (booted == selected) return true
+        if (booted != null) {                                   // (another core: its flash saved, let go)
+            flash.unload()
+            booted = null
+        }
         val err = engine.load(selected)
         if (err != null) {
             message = "cannot load $selected: $err"
             return false
         }
-        if (!engine.boot()) {
+        val note = flash.boot(selected)
+        if (note == null) {
             message = "cannot boot $selected"
             return false
         }
         booted = selected
-        message = ""
+        message = listOf(fallbackNote, note).filter { it.isNotEmpty() }.joinToString(" ")
         return true
     }
 
     private fun applyClock() {
         if (soundOn) {
-            val err = engine.startAudio()
+            val present = outputs.list.map { it.id }
+            val dev = AudioRoute.device(requestedOutput, present)
+            var err = engine.startAudio(dev)
+            if (err != null && dev != 0) err = engine.startAudio(0)     // (the picked one refused: the default)
             if (err != null) {
                 message = "sound: $err"
                 soundOn = false
@@ -231,6 +310,11 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     private fun stopAudio() {
         if (engine.status().getJSONObject("audio").optInt("open") != 0) engine.stopAudio(RfmEngine.CLOCK_TIMER)
     }
+
+    private fun nameOf(id: String) = cores.firstOrNull { it.getString("id") == id }?.getString("name") ?: id
+
+    /** the playing stream's device (0: none) */
+    val playingOn: Int get() = engineStatus.optJSONObject("audio")?.takeIf { it.optInt("open") != 0 }?.optInt("device_id") ?: 0
 
     val coreName: String
         get() = cores.firstOrNull { it.getString("id") == selected }?.let { "${it.getString("name")} ${it.getString("version")}" }
@@ -326,6 +410,11 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         val mv = if (p[2] < 0) null else p[2].toInt()
         if (mv != master) master = mv
         engineStatus = engine.status()
+        if (mode == Mode.CORE && booted != null) {
+            flash.refresh(engineStatus)?.let { message = it }
+            val a = engineStatus.getJSONObject("audio")
+            if (soundOn && a.optInt("open") != 0 && a.optInt("dead") != 0) restartAudio("stream disconnected")
+        }
         // the screen being sent: the core's in Core mode, the link's pattern otherwise
         val seq: Int
         if (mode == Mode.CORE) {
@@ -356,6 +445,8 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     fun shutdown() {
         stopAudio()
         engine.setClock(RfmEngine.CLOCK_NONE)
+        flash.saveStopped()
+        flash.flush()
         link.stop()
         source = Source.TABLET
         playingChanged()
@@ -379,5 +470,9 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
             instance ?: synchronized(this) { instance ?: AppModel(ctx.applicationContext, options).also { instance = it } }
 
         fun peek(): AppModel? = instance
+
+        /** the core to select: [wanted] if this build has it, else the first of [ORDER] it has (iOS CorePlayer.pick) */
+        fun pick(wanted: String?, ids: List<String>): String? =
+            wanted?.takeIf { it in ids } ?: ORDER.firstOrNull { it in ids } ?: ids.firstOrNull()
     }
 }

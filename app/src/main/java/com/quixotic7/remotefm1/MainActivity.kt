@@ -80,6 +80,12 @@ class MainActivity : ComponentActivity() {
         setContent { MaterialTheme(colorScheme = darkColorScheme()) { App() } }
     }
 
+    // the app goes to the background: the flash saved (iOS's didEnterBackground); the sound and link go on
+    override fun onStop() {
+        super.onStop()
+        model.didEnterBackground()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handle(intent)
@@ -151,13 +157,30 @@ class MainActivity : ComponentActivity() {
                     FilterChip(m.selected == id, { m.select(id) }, { Text(c.getString("name")) })
                 }
             }
+            if (m.mode == Mode.CORE) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton({ m.restartFirmware() }) { Text("Restart firmware") }
+                    Text("Its memory is kept (saved ${m.flash.saves} times this session)", fontSize = 12.sp, color = Theme.dim)
+                }
+            }
+            Label("Audio output")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(m.requestedOutput == 0, { m.chooseOutput(0) }, { Text("System default") })
+                m.outputList.forEach { o ->
+                    FilterChip(m.requestedOutput == o.id, { m.chooseOutput(o.id) }, { Text(o.title) })
+                }
+            }
+            if (m.mode == Mode.CORE && m.soundOn) {
+                Text("Playing on " + AudioRoute.name(m.outputList, m.playingOn), fontSize = 12.sp, color = Theme.dim)
+                AudioRoute.hint(m.outputList, m.playingOn)?.let { Text(it, fontSize = 12.sp, color = Theme.teal) }
+            }
             if (m.message.isNotEmpty()) Text(m.message, color = Theme.accent, fontSize = 13.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                 Preview(260)
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(m.statusText, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
                     m.hello?.let { Text("${it.name} ${it.firmwareVersion} · ${if (it.isBluetooth) "Bluetooth" else "USB"}", fontSize = 13.sp) }
-                    if (m.mode == Mode.CORE) Text(m.coreName + if (m.soundOn) " · on the tablet's speaker" else "", fontSize = 13.sp)
+                    if (m.mode == Mode.CORE) Text(m.coreName + if (m.soundOn) " · " + AudioRoute.name(m.outputList, m.playingOn) else "", fontSize = 13.sp)
                     Button({ page = Page.BLUETOOTH }) { Text("Bluetooth…") }
                     OutlinedButton({ page = Page.DIAGNOSTICS }) { Text("Diagnostics") }
                 }
@@ -287,10 +310,22 @@ class MainActivity : ComponentActivity() {
                 "core load" to "${s.optInt("cpu_pct")} % (its own); core thread ${s.optInt("core_load_pct")} %",
                 "render" to "avg ${s.optInt("render_avg_us")} us, max ${s.optInt("render_max_us")} us",
                 "audio" to if (a != null && a.optInt("running") != 0)
-                    "${a.optString("api")} ${a.optInt("rate")} Hz, burst ${a.optInt("frames_per_burst")}, xruns ${a.optInt("xruns")}, underruns ${s.optInt("underruns")}"
-                else "off",
-                "latency" to "${s.optInt("latency_frames")} frames (ring ${s.optInt("ring_target")})",
-                "flash" to "not kept yet (A2): boots fresh",
+                    "${a.optString("api")} ${a.optInt("rate")} Hz x${a.optInt("channels")}, ${a.optString("sharing")}" +
+                        if (a.optInt("performance") == 12) ", low latency" else ""
+                else if (a != null && a.optInt("dead") != 0) "disconnected: reopening" else "off",
+                "output" to AudioRoute.name(model.outputList, model.playingOn) +
+                    (if (model.requestedOutput != 0) " (picked)" else " (default)") + ", device ${model.playingOn}",
+                "stream" to if (a != null && a.optInt("open") != 0)
+                    "burst ${a.optInt("frames_per_burst")}, buffer ${a.optInt("buffer_size")}/${a.optInt("buffer_capacity")}, " +
+                        "latency ${a.optDouble("latency_ms").let { if (it.isNaN() || it < 0) "?" else "%.1f ms".format(it) }}"
+                else "–",
+                "xruns" to "${a?.optInt("xruns") ?: 0} (stream), underruns ${s.optInt("underruns")} (engine, ${s.optInt("underrun_frames")} frames)",
+                "route" to "${model.routeChanges} output changes, ${model.audioRestarts} reopens, ${a?.optInt("disconnects") ?: 0} disconnects",
+                "latency" to "${s.optInt("latency_frames")} frames (ring ${s.optInt("ring_target")}" +
+                    (s.optDouble("rate").takeIf { it > 0 }?.let { ", %.1f ms".format(s.optInt("latency_frames") * 1000.0 / it) } ?: "") + ")",
+                "flash" to "${model.flash.dir.name}/${model.flash.bootedId ?: "–"}.bin, ${s.optInt("flash_size") / 1024} KB, " +
+                    "${model.flash.saves} saves, ${model.flash.reboots} restarts" +
+                    model.flash.lastError.let { if (it.isNotEmpty()) ", error: $it" else "" },
             ))
         }
     }
