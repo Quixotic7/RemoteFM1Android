@@ -233,11 +233,16 @@ class FlashHistoryTest {
         assertNull(p.safety.wipedCopy)
     }
 
-    /** a state from another version: the Load question says so plainly */
-    @Test fun loadQuestionWarnsAboutAnotherVersion() {
+    /** (iOS 3828820) a state from a newer version: the Load question warns; an older version's loads plainly */
+    @Test fun loadQuestionWarnsAboutANewerVersion() {
         var s = SavedState("x", "Jam 3", "", "fizz", "FIZZ", "native", "0.11", "", DataDates.now(), 1, "", origin = "app")
-        assertTrue(s.loadQuestion("0.12").contains("was made with version 0.11; this is 0.12"))
-        assertEquals("Load anyway", s.loadAction("0.12"))
+        assertEquals("Load \"Jam 3\" (made with 0.11) into 0.12? The current memory is kept as a safety copy first.",
+            s.loadQuestion("0.12"))
+        assertEquals("Load", s.loadAction("0.12"))
+        assertTrue(!s.newer("0.12"))
+        assertTrue(s.newer("0.10"))
+        assertTrue(s.loadQuestion("0.10").contains("made with version 0.11, newer than this 0.10"))
+        assertEquals("Load anyway", s.loadAction("0.10"))
         s = s.copy(version = "0.12")
         assertEquals("Load \"Jam 3\"? The current memory is kept as a safety copy first.", s.loadQuestion("0.12"))
         assertEquals("Load", s.loadAction("0.12"))

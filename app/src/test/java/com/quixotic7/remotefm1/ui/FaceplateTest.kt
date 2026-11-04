@@ -156,6 +156,15 @@ class KeybedGeometryTest {
         assertEquals(9, g.stripIndex(g.stripCell(9).midX))
         assertEquals(0f, g.offsetCentering(0))
         assertEquals(g.maxOffset, g.offsetCentering(15), 0.001f)
+        // (RemoteFM1IOS 391497e) let go anywhere: whole keys (no half key at the left); the right end as far as it goes
+        var o = 0f
+        while (o <= g.maxOffset) {
+            val s = g.snap(o)
+            assertTrue("$o -> $s", s == Math.round(s).toFloat() || s == g.maxOffset)
+            assertTrue("$o -> $s", kotlin.math.abs(s - o) <= 0.5f + 0.001f)
+            o += 0.13f
+        }
+        assertTrue((0 until 16).all { val c = g.offsetCentering(it); c == Math.round(c).toFloat() || c == g.maxOffset })
     }
 
     @Test fun slidingFingerFindsTheKeyBeside() {

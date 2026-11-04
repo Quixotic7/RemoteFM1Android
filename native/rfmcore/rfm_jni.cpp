@@ -13,10 +13,15 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <ctime>
+#include <pthread.h>
 
 #include "RFMEngine.h"
 #include "RFMCore.h"
 #include "RFMOboe.h"
+#include "RFMOboeInput.h"
 #include "RFMRealtime.h"
 #include "RFMWasm.h"
 
@@ -31,6 +36,12 @@ struct Host {
     // Oboe call (which may block in Android).
     std::mutex ctl;
     rfmo_stream_t *direct = nullptr;    // nativeStartAudio's stream (tests' synchronous path), under ctl
+    // (tests) a paced audio callback without Oboe: rfme_render every `buffer` frames by the wall clock
+    std::thread paced;
+    std::atomic<bool> pacedRun{false};
+    // (ain1) the audio input, under inLock (its open and close may block in Android: never the main thread's)
+    std::mutex inLock;
+    rfmi_t *input = nullptr;
 };
 
 using Lock = std::lock_guard<std::mutex>;
@@ -162,6 +173,14 @@ JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeDestroy(JNIE
             h->direct = nullptr;
         }
     }
+    {
+        std::lock_guard<std::mutex> g(h->inLock);
+        rfmi_close(h->input);                           // (before the engine goes: its callback pushes into it)
+        h->input = nullptr;
+    }
+    h->pacedRun.store(false);
+    if (h->paced.joinable())
+        h->paced.join();
     rfmo_free(h->out);
     rfme_free(h->e);
     delete h;
@@ -446,6 +465,39 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeStatus(JN
     j.num("flash_size", s.flash_size);
     j.num("flash_dirty", s.flash_dirty);
     j.num("flash_copies", s.flash_copies);
+    j.num("last_sound_ms", s.last_sound_ms);
+    j.num("frames_drawn", s.frames_drawn);
+    j.num("frame_avg_us", s.frame_avg_us);
+    j.num("frames_deferred", s.frames_deferred);
+    j.num("frame_ms", s.frame_ms);
+    j.num("perf_hint", s.perf_hint);
+    {
+        Json ai;
+        uint32_t shortF = 0, dropF = 0;
+        rfme_ain_stats(h->e, &shortF, &dropF);
+        ai.num("mode", rfme_ain_mode(h->e));
+        ai.num("short_frames", shortF);
+        ai.num("dropped_frames", dropF);
+        std::unique_lock<std::mutex> g(h->inLock, std::try_to_lock);   // (never waits on an open or a close)
+        if (g.owns_lock() && h->input) {
+            rfmi_info_t i;
+            rfmi_info(h->input, 0, &i);
+            ai.num("open", 1);
+            ai.num("device_id", i.device_id);
+            ai.num("rate", i.rate);
+            ai.num("channels", i.channels);
+            ai.num("frames_per_burst", i.frames_per_burst);
+            ai.num("latency_ms", i.latency_ms);
+            ai.num("frames", (double)i.frames);
+            ai.num("callbacks", i.callbacks);
+            ai.num("xruns", i.xruns);
+            ai.num("peak", i.peak);
+            ai.num("mmap", i.mmap);
+        } else {
+            ai.num("open", 0);
+        }
+        j.raw("audio_in", ai.done());
+    }
     Json a;
     a.num("open", o.open);
     a.num("running", o.running);
@@ -783,3 +835,162 @@ JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeMidiOutTake(
 
 } // extern "C"
 
+
+// ---- speed (iOS 836a983, 3828820, 14c9b96, dfbc827) and ain1 (23bba90, c47ac4f)
+extern "C" {
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetLatency(JNIEnv *, jclass, jlong p, jint headroom,
+                                                                              jint minBuffer)
+{
+    rfme_set_latency(host(p)->e, (uint32_t)(headroom < 0 ? 0 : headroom), (uint32_t)(minBuffer < 0 ? 0 : minBuffer));
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetRealtime(JNIEnv *, jclass, jlong p, jboolean on)
+{
+    rfme_set_realtime(host(p)->e, on ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetFrameMs(JNIEnv *, jclass, jlong p, jint ms)
+{
+    rfme_set_frame_ms(host(p)->e, (uint32_t)(ms < 15 ? 15 : ms));
+}
+
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeAinMode(JNIEnv *, jclass, jlong p)
+{
+    return rfme_ain_mode(host(p)->e);
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeAinSet(JNIEnv *, jclass, jlong p, jboolean on,
+                                                                         jint latency, jint target)
+{
+    rfme_ain_set(host(p)->e, on ? 1 : 0, (uint32_t)(latency < 0 ? 0 : latency), (uint32_t)(target < 0 ? 0 : target));
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeAinPush(JNIEnv *env, jclass, jlong p, jshortArray s,
+                                                                          jint frames)
+{
+    if (!s || frames <= 0)
+        return;
+    const jsize n = env->GetArrayLength(s);
+    if (frames * 2 > n)
+        frames = n / 2;
+    std::vector<int16_t> v((size_t)frames * 2);
+    env->GetShortArrayRegion(s, 0, frames * 2, reinterpret_cast<jshort *>(v.data()));
+    rfme_ain_push(host(p)->e, v.data(), (uint32_t)frames);
+}
+
+// (tests) float input at its own rate through the engine's resampler, as the Oboe input's callback hands it over
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeAinPushF32(JNIEnv *env, jclass, jlong p, jfloatArray l,
+                                                                             jfloatArray r, jint frames, jdouble rate)
+{
+    if (!l || frames <= 0 || env->GetArrayLength(l) < frames || (r && env->GetArrayLength(r) < frames))
+        return;
+    std::vector<float> L((size_t)frames), R(r ? (size_t)frames : 0);
+    env->GetFloatArrayRegion(l, 0, frames, L.data());
+    if (r)
+        env->GetFloatArrayRegion(r, 0, frames, R.data());
+    rfme_ain_push_f32(host(p)->e, L.data(), r ? R.data() : nullptr, (uint32_t)frames, rate);
+}
+
+// (may block in Android: the audio-control thread's) the input opened on `device` (0: the default mic) and started;
+// "" or the error. Any input before it is closed first
+JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeInputStart(JNIEnv *env, jclass, jlong p, jint device)
+{
+    Host *h = host(p);
+    std::lock_guard<std::mutex> g(h->inLock);
+    rfmi_close(h->input);
+    h->input = nullptr;
+    char err[160] = {};
+    h->input = rfmi_open(h->e, device, err, sizeof err);
+    return utf(env, h->input ? "" : (err[0] ? err : "input open failed"));
+}
+
+// (may block) the input closed
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeInputStop(JNIEnv *, jclass, jlong p)
+{
+    Host *h = host(p);
+    std::lock_guard<std::mutex> g(h->inLock);
+    rfmi_close(h->input);
+    h->input = nullptr;
+}
+
+// (may block) the input's latency (ms, -1 unknown) asked of Android again; -2: no input
+JNIEXPORT jdouble JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeInputLatencyMs(JNIEnv *, jclass, jlong p)
+{
+    Host *h = host(p);
+    std::lock_guard<std::mutex> g(h->inLock);
+    if (!h->input)
+        return -2;
+    rfmi_info_t i;
+    rfmi_info(h->input, 1, &i);
+    return i.latency_ms;
+}
+
+// the .rfm1 at path: 0 takes no audio input, 1 its manifest wants ain1, 2 needs it; -1 not a valid file
+JNIEXPORT jint JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeAudioInOf(JNIEnv *env, jclass, jstring path)
+{
+    const char *c = path ? env->GetStringUTFChars(path, nullptr) : nullptr;
+    if (!c)
+        return -1;
+    rfmw_info_t i{};
+    char err[256];
+    const int ok = rfmw_check(c, &i, err, sizeof err);
+    env->ReleaseStringUTFChars(path, c);
+    return ok ? (jint)i.audio_in : -1;
+}
+
+} // extern "C"
+
+// ---- tests: a phone's audio callback on the emulator (whose output has 20 ms bursts): rfme_render of `buffer`
+// frames at `rate` every buffer period by the wall clock, on a thread at audio priority, until nativeTestPacedStop;
+// and a slower CPU (rfme_test_slowdown)
+extern "C" {
+
+JNIEXPORT jboolean JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTestPacedStart(JNIEnv *, jclass, jlong p,
+                                                                                     jint buffer, jdouble rate)
+{
+    Host *h = host(p);
+    if (h->paced.joinable() || buffer <= 0 || buffer > 4096 || !(rate > 0))
+        return JNI_FALSE;
+    {
+        Lock l(h->ctl);
+        rfme_set_clock(h->e, RFME_CLOCK_AUDIO);
+    }
+    h->pacedRun.store(true);
+    h->paced = std::thread([h, buffer, rate] {
+        pthread_setname_np(pthread_self(), "RFM paced");
+        rfm::setRealtime(buffer / rate);
+        std::vector<float> L((size_t)buffer), R((size_t)buffer);
+        timespec next;
+        clock_gettime(CLOCK_MONOTONIC, &next);
+        const long periodNs = (long)(buffer / rate * 1e9);
+        while (h->pacedRun.load()) {
+            rfme_render(h->e, L.data(), R.data(), (uint32_t)buffer, rate);
+            next.tv_nsec += periodNs;
+            while (next.tv_nsec >= 1000000000L) {
+                next.tv_nsec -= 1000000000L;
+                next.tv_sec++;
+            }
+            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr);
+        }
+    });
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTestPacedStop(JNIEnv *, jclass, jlong p)
+{
+    Host *h = host(p);
+    h->pacedRun.store(false);
+    if (h->paced.joinable())
+        h->paced.join();
+    Lock l(h->ctl);
+    if (rfme_clock(h->e) == RFME_CLOCK_AUDIO)
+        rfme_set_clock(h->e, RFME_CLOCK_NONE);
+}
+
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTestSlowdown(JNIEnv *, jclass, jlong p, jfloat f)
+{
+    rfme_test_slowdown(host(p)->e, f);
+}
+
+} // extern "C"

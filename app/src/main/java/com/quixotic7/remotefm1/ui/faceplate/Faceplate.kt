@@ -97,7 +97,7 @@ fun FaceplateView(feed: PanelFeed, ui: FaceplateUi, theme: Theme, chip: PanelChi
             when (page) {
                 FaceplateUi.Page.FULL -> FullView(feed, ui, theme, chip, protector, k, w, h, chrome, onWord, openSheet)
                 FaceplateUi.Page.CONTROLS -> ControlsView(feed, ui, theme, chip, w, h, chrome, onWord, openSheet)
-                FaceplateUi.Page.SCREEN -> ScreenOnlyView(feed, ui, theme, chip, w, h, chrome, openSheet)
+                FaceplateUi.Page.SCREEN -> ScreenOnlyView(feed, ui, theme, chip, w, h, chrome, openSheet, onWord)
             }
         }
         AnimatedVisibility(ui.displayAlone, enter = fadeIn(tween(250)) + scaleIn(tween(250), 0.92f),
@@ -393,7 +393,7 @@ private fun DeckSwitch(theme: Theme, ui: FaceplateUi, scale: Float, modifier: Mo
 
 @Composable
 private fun ScreenOnlyView(feed: PanelFeed, ui: FaceplateUi, theme: Theme, chip: PanelChip, w: Float, h: Float,
-                           chrome: Boolean, openSheet: () -> Unit) {
+                           chrome: Boolean, openSheet: () -> Unit, onWord: (() -> Unit)? = null) {
     val portrait = h >= w
     val ref = if (portrait) FaceplateLayout.Kind.PHONE_PORTRAIT.ref else FaceplateLayout.Kind.PHONE_LANDSCAPE.ref
     val m = FaceplateLayout.Mapper(ref, PSize(w, h), uniform = true)
@@ -403,10 +403,10 @@ private fun ScreenOnlyView(feed: PanelFeed, ui: FaceplateUi, theme: Theme, chip:
     Box(Modifier.fillMaxSize()) {
         if (chrome) {
             if (portrait && w < 600) {
-                StatusRow(theme, chip, FaceplateLayout.phoneStatus, m, "SCREEN", null, openSheet)
+                StatusRow(theme, chip, FaceplateLayout.phoneStatus, m, ui.word, onWord, openSheet)   // (F, iOS 836a983: the firmware's name)
             } else if (portrait) {
                 StatusRow(theme, chip, FaceplateLayout.padStatus,
-                          FaceplateLayout.Mapper(FaceplateLayout.Kind.PAD_PORTRAIT.ref, PSize(w, h)), "SCREEN", null, openSheet)
+                          FaceplateLayout.Mapper(FaceplateLayout.Kind.PAD_PORTRAIT.ref, PSize(w, h)), ui.word, onWord, openSheet)
             } else {
                 Grabber(theme, 88f, 40f, 20f, openSheet, Modifier.centredAt(w / 2, 22f, 88f, 44f))
             }

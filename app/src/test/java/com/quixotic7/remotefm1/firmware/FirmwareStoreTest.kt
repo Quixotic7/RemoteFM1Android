@@ -3,7 +3,8 @@
 // Ported from RemoteFM1IOS edf2039 RFMKit/Tests/RFMKitTests/FirmwareStoreTests.swift (the store: the check, the
 // cache shown offline, at most once a day; installs through a fake network: checked and imported (amb-1.3.rfm1), a
 // checksum mismatch, the wrong size, another feed's copy, a file the loader refuses, a plain-http address, an update
-// keeping the previous file, Cancel). The loader is FakeRfm1 here (the native one: FirmwareTest on the emulator).
+// keeping the previous file, Cancel); d629aa0's testFWCatalogTextAndImages, TransferTests.testOlderVersionsFromReleases'
+// store half, Update all. The loader is FakeRfm1 here (the native one: FirmwareTest on the emulator).
 package com.quixotic7.remotefm1.firmware
 
 import org.junit.After
@@ -70,10 +71,12 @@ class FirmwareStoreTest {
     private fun transport() = FakeTransport().apply {
         pages[FirmwareFeed.REMOTEFM1.url] = FakeRfm1.catalogJSON
         pages[FirmwareFeed.RELEASES.url] = FakeRfm1.releaseJSON
+        pages[FirmwareFeed.FW_CATALOG.url] = FakeRfm1.fixture("fwcatalog-2026-11-01.json").readBytes()
     }
 
     private fun store(lib: FirmwareLibrary, t: FakeTransport) =
-        FirmwareStore(lib, transport = t, cacheFile = File(root, "cache/feeds.json"), tmpDir = File(root, "tmp"), now = { clock })
+        FirmwareStore(lib, transport = t, cacheFile = File(root, "cache/feeds.json"), tmpDir = File(root, "tmp"), now = { clock },
+            thumbs = FirmwareThumbs(File(root, "Thumbs"), writePng = { _, _, _, f -> f.writeText("png"); true }))
 
     private fun entry(id: String, version: String, sha: String, size: Long, urls: List<String>) =
         AvailableFirmware(id, name = id.uppercase(), version = version,
@@ -92,7 +95,7 @@ class FirmwareStoreTest {
         val whenChecked = s.checked!!
         assertTrue(s.cacheFile.isFile)
         assertEquals(5, s.list(listOf(CoreInfo("fizz", version = "0.12.0-beta.12"))).size)
-        assertEquals(2, s.report.value.size)
+        assertEquals(3, s.report.value.size)
 
         // offline: a new store shows the cached list and its date; a check keeps it and says why
         t.offline = true
@@ -125,6 +128,7 @@ class FirmwareStoreTest {
         // and not again within a minute, whatever its age
         t.pages[FirmwareFeed.REMOTEFM1.url] = FakeRfm1.catalogJSON
         t.pages[FirmwareFeed.RELEASES.url] = FakeRfm1.releaseJSON
+        t.pages[FirmwareFeed.FW_CATALOG.url] = FakeRfm1.fixture("fwcatalog-2026-11-01.json").readBytes()
         s3.refreshIfOlder(0)
         assertTrue(s3.problem.value.contains("404"))
     }
@@ -294,5 +298,136 @@ class FirmwareStoreTest {
         // details: every firmware of the site catalog, downloadable or not
         assertNotNull(s.details["felucca"])
         assertEquals("AMB-1", s.details["amb"]?.name)
+    }
+
+    private val png1 = java.util.Base64.getDecoder().decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==")
+
+    /** RemoteFM1FW's catalog: its text and images win over remotefm1.com's, its images are kept (offline too) and
+     *  shown before the shipped and captured thumbnails, fetched again only for a new release */
+    @Test fun fwCatalogTextAndImages() {
+        val lib = library()
+        lib.sync()
+        val t = transport()
+        val img = "https://raw.githubusercontent.com/Quixotic7/RemoteFM1FW/main/catalog/images/"
+        t.files[img + "amb.png"] = png1
+        t.files[img + "grimm.png"] = png1
+        val s = store(lib, t)
+        s.refresh()
+        assertEquals("", s.problem.value)
+        assertTrue(s.report.value.toString(), s.report.value.any { it.contains("3 cards") })
+        val d = s.details
+        assertEquals("an id only the catalog has", "Grim drums", d["grimm"]?.summary)
+        assertEquals(img + "grimm.png", d["grimm"]?.image)
+        assertEquals("the catalog's text always", "Catalog text for amb.", d["amb"]?.about)
+        assertEquals("Generative ambient", d["amb"]?.summary)
+        val amb = s.available.value.first { it.id == "amb" }
+        assertEquals(img + "amb.png", amb.image)
+        assertEquals("Catalog text for amb.", amb.about)
+        assertTrue(amb.downloads.isNotEmpty())
+        assertNull(d["broken"])
+
+        val th = s.thumbs!!
+        assertEquals("catalog", th.source("grimm"))
+        assertTrue(th.png("grimm")!!.contentEquals(png1))
+        assertTrue(!th.exists("zen1"))
+        assertTrue(th.save(ByteArray(240 * 240 * 4) { 200.toByte() }, "amb"))
+        assertEquals("the catalog's beats a captured one", "catalog", th.source("amb"))
+        assertEquals(2, t.started)
+
+        // a check again: nothing fetched; offline the kept images still show
+        s.refresh()
+        assertEquals(2, t.started)
+        t.offline = true
+        val s2 = store(lib, t)
+        s2.refresh()
+        assertTrue(s2.thumbs!!.png("grimm") != null)
+        assertEquals("the cached catalog", "Grim drums", s2.details["grimm"]?.summary)
+
+        // a new release: fetched again; a failed one keeps its copy
+        t.offline = false
+        t.pages[FirmwareFeed.RELEASES.url] = String(FakeRfm1.releaseJSON).replace("\"tag_name\": \"2026-10-29\"", "\"tag_name\": \"9999-01-01\"").toByteArray()
+        t.files[img + "grimm.png"] = "not an image".toByteArray()
+        s2.refresh()
+        assertEquals(4, t.started)
+        assertTrue("the old copy kept", FirmwareThumbs(s2.thumbs!!.dir).png("grimm")!!.contentEquals(png1))
+    }
+
+    /** every release's versions: read on demand, cached for offline, details filled; the release dates */
+    @Test fun olderVersionsFromReleases() {
+        fun release(tag: String, at: String, names: List<String>) = """{"tag_name":"$tag","draft":false,"published_at":"$at","assets":[""" +
+            names.joinToString(",") { """{"name":"$it","size":10,"browser_download_url":"https://github.com/x/$tag/$it","digest":"sha256:AB"}""" } + "]}"
+        val list = "[" + listOf(release("c", "2026-11-01T20:00:00Z", listOf("choralroot-0.29.rfm1", "amb-1.3.rfm1", "notes.txt")),
+            release("b", "2026-10-20T10:00:00Z", listOf("choralroot-0.28.rfm1", "amb-1.3.rfm1")),
+            """{"tag_name":"draft","draft":true,"assets":[{"name":"choralroot-9.rfm1","browser_download_url":"https://x/y"}]}""",
+            "42",
+            release("a", "2026-10-01T10:00:00Z", listOf("choralroot-0.26.1.rfm1"))).joinToString(",") + "]"
+        val v = FeedSnapshot.versions(list.toByteArray(), "test")
+        assertEquals(listOf("0.29", "0.28", "0.26.1"), v["choralroot"]?.map { it.version })
+        assertEquals(listOf("1.3"), v["amb"]?.map { it.version })
+        assertEquals("the newest release's", "https://github.com/x/c/amb-1.3.rfm1", v["amb"]?.first()?.downloads?.first()?.url)
+        assertEquals("ab", v["amb"]?.first()?.sha256)
+        assertEquals(Instant.parse("2026-11-01T20:00:00Z"), v["choralroot"]?.first()?.released)
+        assertEquals("the first release with that version", Instant.parse("2026-10-20T10:00:00Z"), v["amb"]?.first()?.released)
+        // (survives the cache)
+        val back = AvailableFirmware.fromMap(MiniJson.parse(MiniJson.write(v["amb"]!!.first().toMap())).obj())
+        assertEquals(v["amb"]!!.first().released, back?.released)
+
+        val lib = library()
+        lib.sync()
+        val t = transport()
+        t.pages[FirmwareFeed.ALL_RELEASES] = list.toByteArray()
+        val s = store(lib, t)
+        assertNull(s.version("choralroot", "0.28"))
+        s.loadVersions()
+        assertEquals("Choralroot", s.version("choralroot", "0.28")?.displayName)
+        assertEquals(Instant.parse("2026-11-01T20:00:00Z"), s.updated("choralroot"))
+        assertNull(s.updated("felucca"))
+        t.offline = true
+        val s2 = store(lib, t)
+        assertEquals("the cache, offline", 3, s2.versions("choralroot").size)
+        s2.loadVersions(0)
+        assertEquals("a failure keeps it", 3, s2.versions("choralroot").size)
+        // with the site catalog read: its details filled in
+        t.offline = false
+        s2.refresh()
+        assertEquals("ChoralRoot", s2.versions("choralroot")[0].name)
+    }
+
+    /** Update all: each in turn, a failure doesn't stop the rest; the message says beside a newer one */
+    @Test fun updateAllAndBesideTheNewer() {
+        val lib = library()
+        lib.sync()
+        val t = transport()
+        val s = store(lib, t)
+        val bad = entry("junk", "1.0", "", 5, listOf("https://a.test/junk-1.0.rfm1"))
+        t.files[bad.downloads[0].url] = "junk!".toByteArray()
+        val good = entry("amb", "1.3", FakeRfm1.AMB_SHA, amb.size.toLong(), listOf("https://a.test/amb-1.3.rfm1"))
+        t.files[good.downloads[0].url] = amb
+        assertEquals(2, s.updateAll(listOf(bad, good)))
+        assertEquals(listOf(FakeRfm1.AMB_SHA), lib.files.value.map { it.sha256 })
+        assertNull(s.updatingAll.value)
+        // an older version installed next to a newer one: said so
+        val m = String(FakeRfm1.sections(amb)!!["rfm1"]!!).replace("\"version\":\"1.3\"", "\"version\":\"1.4\"")
+            .replace("\"version\": \"1.3\"", "\"version\": \"1.4\"")
+        val body = byteArrayOf(4) + "rfm1".toByteArray() + m.toByteArray()
+        val newer = amb + byteArrayOf(0) + leb(body.size) + body
+        lib.delete(lib.files.value[0])
+        val n = lib.import(newer.inputStream(), "amb-1.4.rfm1")
+        assertEquals("1.4", n.version)
+        s.install(good)
+        assertEquals("Installed AMB-1 1.3 beside the newer one.", s.message.value)
+    }
+
+    private fun leb(v: Int): ByteArray {
+        val out = ArrayList<Byte>()
+        var x = v
+        do {
+            var b = x and 0x7F
+            x = x ushr 7
+            if (x != 0) b = b or 0x80
+            out.add(b.toByte())
+        } while (x != 0)
+        return out.toByteArray()
     }
 }

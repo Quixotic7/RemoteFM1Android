@@ -4,6 +4,9 @@
 // (RFMHostParams, the AU's parameter tree: rfme_hp_*, rfme_render_events) and the audio workgroup are left out;
 // time is rfm::nowTicks (ns) instead of mach ticks; the core thread is named with pthread_setname_np(self) and
 // runs at audio priority (RFMRealtime.h). Everything else as there.
+// Ported later from RemoteFM1IOS d629aa0: rfme_set_frame_ms and last_sound_ms (dfbc827), the core thread's priority per
+// kind, frame() waiting while the ring is low, the load per chunk (14c9b96), ain1's input ring (23bba90, c47ac4f).
+// Android adds frames_drawn / frame_avg_us / frames_deferred to the status.
 // The core engine (include/RFMEngine.h). Adapted from RemoteFM1 v0.2.2's host/tools/fm1remote/engine.cpp (Engine:
 // the between hook, the publish at most every frame period and only on change, the flash copy every 30 device s and
 // final_flash, the timer clock). Changed: ABI 6's fm1panel_t instead of emu_hal_t, with FM1VST v0.6.2's
@@ -162,8 +165,12 @@ struct rfme final {
     // the core (the control thread changes these only with the clock stopped)
     rfm::CoreFactory factory;               // makes the backend (the load's; a power cycle makes a new one with it)
     std::unique_ptr<rfm::CoreBackend> core; // the firmware (a native slot; later a Wasm module)
+    rfm::AudioIn ain;                       // (ain1) the host's audio input, for a core that takes it
+    double ainPos = 0, ainRate = 0;          // (rfme_ain_push_f32: its linear resampler, the input thread's)
+    float ainPrevL = 0, ainPrevR = 0;
     std::unique_ptr<rfm::CoreDevice> dev;   // its clock
     uint32_t stallUs = 0;                   // (tests) rfme_test_frame_stall
+    std::atomic<float> testSlow{1.f};       // (tests) rfme_test_slowdown: each chunk takes this many times as long
     uint8_t btnId[FM1P_NB] = {}, encId[FM1P_NE - 1] = {};   // the panel's label / role maps, as init left them
     bool booted = false;
     std::vector<uint8_t> flashCopy;     // the clock's copy, handed over by flashReady
@@ -192,6 +199,7 @@ struct rfme final {
     // (M8) a controller's MIDI, learn and the learned map. The queues' producers: rfme_midi_in's callers (serialised
     // by ctlLock, never the audio thread) and the core thread (learnQ); the map comes over in a Triple
     rfm::Spsc<CtlEvent, 1024> ctlQ;
+    std::atomic<uint32_t> frameMs{15};  // (the battery, PerfGuard) the screen's frame() period, kept across loads
     rfm::Spsc<uint32_t, 4096> sysexQ;   // (a web manager's SysEx, rfme_sysex_in) USB-MIDI packets for the core's midi_in
     std::mutex ctlLock;
     rfm::Spsc<LearnMsg, 256> learnQ;
@@ -222,6 +230,7 @@ struct rfme final {
 
     // read by anyone
     std::atomic<bool> halted{false}, flashReady{false}, flashReq{false};
+    std::atomic<uint32_t> lastSoundMs{0};    // (the battery: idle detection) the device ms of the last audible chunk
     std::atomic<uint32_t> haltCode{0}, devMs{0}, lcdWrites{0}, snapshots{0}, applied{0}, dropped{0}, keysPressed{0};
     std::atomic<uint32_t> lastVel{0}, lastLean{0};  // (TOUCH) key << 8 | the key_vel / key_lean last given the core
     std::atomic<uint32_t> midiOut{0}, shed{0}, cpuPct{0}, haveStats{0}, flashCopies{0}, flashDirty{0};
@@ -242,6 +251,9 @@ struct rfme final {
     std::atomic<bool> offlineWaiting{false};
     std::atomic<uint32_t> periodUs{0};      // the host buffer's duration: the core thread's real-time period
     std::atomic<int> rtOk{0};
+    std::atomic<int> hintOk{0};             // (Android 13+) the core thread's performance hint session is on
+    rfm::PerfHint hint;                     // (the core thread's)
+    std::atomic<int> rtWant{1};             // the core thread at audio priority (1), or ordinary (0: a Wasm core)
     bool timerRebase = true;                // (the core thread's)
     bool producing = false;                 // (the core thread's) inside produce(): the MIDI out is kept
     uint64_t outAt = 0;                     // (the core thread's) the ring position of the render running
@@ -278,6 +290,8 @@ struct rfme final {
     std::atomic<bool> fillReset{false};
     // the producer's (per wake: about one host buffer)
     std::atomic<uint64_t> coreTicks{0}, coreWakes{0}, coreFrames{0}, coreMaxTicks{0}, frameMaxTicks{0};
+    std::atomic<uint64_t> frameSumTicks{0};
+    std::atomic<uint32_t> framesDrawn{0}, framesDeferred{0};
     std::atomic<bool> coreReset{false};
 
     // the main thread's view of the preview
@@ -776,13 +790,19 @@ struct rfme final {
         gCoreThreads.fetch_add(1);
         pthread_setname_np(pthread_self(), "RFM core");
         uint32_t period = ~0u;
+        int rt = -1;
         for (;;) {
             if (quit.load(std::memory_order_acquire))
                 break;
             const uint32_t want = periodUs.load(std::memory_order_relaxed);
-            if (want != period) {                       // (real time, its period the host buffer's: when it changes)
+            const int rw = rtWant.load(std::memory_order_relaxed);
+            if (want != period || rw != rt) {           // (audio priority, its period the host buffer's: on a change)
                 period = want;
-                rtOk.store(rfm::setRealtime(want ? want * 1e-6 : 0), std::memory_order_relaxed);
+                rt = rw;
+                rtOk.store(rt ? rfm::setRealtime(want ? want * 1e-6 : 0) : rfm::setHighPriority(),
+                           std::memory_order_relaxed);
+                // (ADPF) its work each wake against the host buffer's duration: the CPU sped up before it is late
+                hintOk.store(hint.start(want ? (int64_t)want * 1000 : 0) ? 1 : 0, std::memory_order_relaxed);
             }
             const int c = clock.load(std::memory_order_seq_cst);
             if (c == RFME_CLOCK_AUDIO) {
@@ -795,6 +815,7 @@ struct rfme final {
                 wake.wait_us(50000);
             }
         }
+        hint.stop();
         gCoreThreads.fetch_sub(1);
     }
 
@@ -834,6 +855,9 @@ struct rfme final {
             coreMaxTicks.store(0, std::memory_order_relaxed);
         }
         frameMaxTicks.store(dev->frame_ticks_max(), std::memory_order_relaxed);
+        frameSumTicks.store(dev->frame_ticks_sum(), std::memory_order_relaxed);
+        framesDrawn.store(dev->frames_drawn(), std::memory_order_relaxed);
+        framesDeferred.store(dev->frames_deferred(), std::memory_order_relaxed);
     }
 
     // RFME_CLOCK_AUDIO: the ring filled up to its target, host events applied at their positions
@@ -861,18 +885,29 @@ struct rfme final {
             const uint32_t tgt = target.load(std::memory_order_relaxed);
             if (fill >= tgt || fill + kChunk > kRingFrames)
                 break;
+            dev->set_behind(fill < tgt / 2);            // (low: the screen waits)
+            const uint64_t c0 = rfm::nowTicks();
+            const uint64_t s0 = rfm::nowTicks();
             renderChunk(w, kChunk, rate);
+            const float slow = testSlow.load(std::memory_order_relaxed);
+            if (slow > 1.f) {                           // (tests: a slower CPU, the chunk's own time stretched)
+                const uint64_t until = s0 + (uint64_t)((double)(rfm::nowTicks() - s0) * slow);
+                while (rfm::nowTicks() < until) {
+                }
+            }
             posW.store(w + kChunk, std::memory_order_release);
             made += kChunk;
+            // (counted per chunk: a core that never catches up still shows its load)
+            coreTicks.fetch_add(rfm::nowTicks() - c0, std::memory_order_relaxed);
+            coreFrames.fetch_add(kChunk, std::memory_order_relaxed);
             if (offlineWaiting.load(std::memory_order_acquire))
                 produced.signal();
         }
         producing = false;
         if (made) {
             const uint64_t dt = rfm::nowTicks() - t0;
-            coreTicks.fetch_add(dt, std::memory_order_relaxed);
+            hint.report((int64_t)dt);                   // (ticks are ns here)
             coreWakes.fetch_add(1, std::memory_order_relaxed);
-            coreFrames.fetch_add(made, std::memory_order_relaxed);
             if (dt > coreMaxTicks.load(std::memory_order_relaxed))
                 coreMaxTicks.store(dt, std::memory_order_relaxed);
         }
@@ -921,6 +956,14 @@ struct rfme final {
             pos = next;
         }
         flushMidiIn();
+        // (idle detection for the app's background policy) anything above a whisper (-60 dBFS) counts as sound
+        for (uint64_t f = w; f < end; f++) {
+            const uint32_t j = (uint32_t)(f & (kRingFrames - 1));
+            if (std::fabs(bufL[j]) > 0.001f || std::fabs(bufR[j]) > 0.001f) {
+                lastSoundMs.store(devMs.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                break;
+            }
+        }
     }
 
     // ---- the audio callback (RFME_CLOCK_AUDIO): the ring into L and R, host events queued. Real-time safe:
@@ -1098,7 +1141,10 @@ struct rfme final {
             c = rfm::stallingCore(std::move(c), stallUs);
         std::lock_guard<std::mutex> g(coreLock);
         core = std::move(c);
+        ain.set(0, 0);                                  // (a new firmware: input off until the host says)
+        core->set_audio_in(&ain);
         dev = std::make_unique<rfm::CoreDevice>(*core);
+        dev->set_frame_ms(frameMs.load(std::memory_order_relaxed));
         namesGen.fetch_add(1);
         return true;
     }
@@ -1319,6 +1365,79 @@ int rfme_midi_in(rfme_t *e, const uint8_t *data, uint32_t len, int to_firmware)
     return ok ? 1 : 0;
 }
 
+int rfme_ain_mode(rfme_t *e) { return e->core ? e->core->audio_in_mode() : 0; }
+
+void rfme_ain_set(rfme_t *e, int state, uint32_t latency_frames, uint32_t target_frames)
+{
+    if (target_frames)
+        e->ain.target.store(target_frames < 128 ? 128 : target_frames > 8192 ? 8192 : target_frames);
+    e->ain.set(state ? 1 : 0, latency_frames);
+}
+
+void rfme_ain_push(rfme_t *e, const int16_t *stereo, uint32_t frames) { e->ain.push(stereo, frames); }
+
+void rfme_ain_push_f32(rfme_t *e, const float *left, const float *right, uint32_t frames, double rate)
+{
+    if (!left || !frames || !(rate > 0))
+        return;
+    if (!right)
+        right = left;                                   // (mono: both channels)
+    if (rate != e->ainRate) {
+        e->ainRate = rate;
+        e->ainPos = 0;
+        e->ainPrevL = e->ainPrevR = 0;
+    }
+    const double step = rate / 44100.0;                 // input frames per output frame
+    int16_t out[2 * 256];
+    uint32_t n = 0;
+    auto s16 = [](float v) -> int16_t {
+        const float c = v > 1.f ? 1.f : v < -1.f ? -1.f : v;
+        return (int16_t)lrintf(c * 32767.f);
+    };
+    // ainPos: where the next output frame falls, in input frames relative to this buffer (-1..0: between the last
+    // buffer's final frame, kept in prev, and this one's first)
+    double pos = e->ainPos;
+    while (pos < (double)frames - 1.0 || (pos < (double)frames && pos < 0)) {
+        const int i = (int)std::floor(pos);
+        const float f = (float)(pos - i);
+        const float l0 = i < 0 ? e->ainPrevL : left[i], r0 = i < 0 ? e->ainPrevR : right[i];
+        const float l1 = left[i + 1], r1 = right[i + 1];
+        out[2 * n] = s16(l0 + (l1 - l0) * f);
+        out[2 * n + 1] = s16(r0 + (r1 - r0) * f);
+        if (++n == 256) {
+            e->ain.push(out, n);
+            n = 0;
+        }
+        pos += step;
+    }
+    if (n)
+        e->ain.push(out, n);
+    e->ainPrevL = left[frames - 1];
+    e->ainPrevR = right[frames - 1];
+    e->ainPos = pos - (double)frames;
+}
+
+void rfme_ain_stats(rfme_t *e, uint32_t *short_frames, uint32_t *dropped_frames)
+{
+    if (short_frames)
+        *short_frames = e->ain.shortFrames.load();
+    if (dropped_frames)
+        *dropped_frames = e->ain.droppedFrames.load();
+}
+
+void rfme_set_realtime(rfme_t *e, int on)
+{
+    e->rtWant.store(on ? 1 : 0, std::memory_order_relaxed);
+    e->wake.signal();
+}
+
+void rfme_set_frame_ms(rfme_t *e, uint32_t ms)
+{
+    e->frameMs.store(ms, std::memory_order_relaxed);
+    if (e->dev)
+        e->dev->set_frame_ms(ms);                       // (an atomic: safe while the core thread runs it)
+}
+
 int rfme_sysex_in(rfme_t *e, const uint8_t *data, uint32_t len)
 {
     if (!data || len < 2 || data[0] != 0xF0 || data[len - 1] != 0xF7)
@@ -1481,6 +1600,12 @@ void rfme_status(rfme_t *e, rfme_status_t *st)
     st->midi_mapped = e->midiMapped.load();
     st->midi_learned = e->midiLearned.load();
     st->midi_to_core = e->midiToCore.load();
+    st->last_sound_ms = e->lastSoundMs.load();
+    st->frames_drawn = e->framesDrawn.load();
+    st->frames_deferred = e->framesDeferred.load();
+    st->frame_avg_us = st->frames_drawn ? (uint32_t)((double)e->frameSumTicks.load() * e->usPerTick / st->frames_drawn) : 0;
+    st->frame_ms = e->frameMs.load();
+    st->perf_hint = e->hintOk.load();
 }
 
 void rfme_reset_render_stats(rfme_t *e)
@@ -1640,5 +1765,7 @@ int rfme_param_persist(rfme_t *e, char *name, uint32_t n, int32_t *min, int32_t 
 }
 
 void rfme_test_frame_stall(rfme_t *e, uint32_t us) { e->stallUs = us; }
+
+void rfme_test_slowdown(rfme_t *e, float factor) { e->testSlow.store(factor > 1.f ? factor : 1.f); }
 
 } // extern "C"

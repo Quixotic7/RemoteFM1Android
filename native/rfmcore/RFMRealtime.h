@@ -71,5 +71,25 @@ private:
 // the calling thread at audio priority; `period_s` (the host buffer's duration) is kept for the iOS API's sake.
 // Returns 0 refused, 1 SCHED_FIFO, 2 nice -19 (the usual result for an app on Android)
 int setRealtime(double period_s);
+// (iOS 14c9b96's setHighPriority) the calling thread an ordinary one (SCHED_OTHER) at nice -19: for work too lumpy
+// for a real-time budget (an interpreted core's screen redraw can take many host buffers). Returns 3, or 0 refused
+int setHighPriority();
+
+// (Android 13+, ADPF) a performance hint session for the calling thread: the work it does each wake against a
+// target (the host buffer's duration), so the system raises the CPU's clock (or moves the thread to a big core) when
+// the work runs long instead of finding out late. Nothing where the device has no hint support (the emulator, Android
+// 12 and older). One thread's: start, report and stop on the thread it is for
+class PerfHint {
+public:
+    ~PerfHint() { stop(); }
+    bool start(int64_t target_ns);          // (again: the target updated) false: no hint support here
+    void report(int64_t actual_ns);
+    void stop();
+    bool on() const { return session_ != nullptr; }
+
+private:
+    void *session_ = nullptr;
+    int64_t target_ = 0;
+};
 
 } // namespace rfm

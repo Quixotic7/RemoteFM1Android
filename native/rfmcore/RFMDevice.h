@@ -10,6 +10,7 @@
 //
 // Threading: all calls on one thread at a time (the core's), as core-api/fm1core.h requires.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <utility>
@@ -57,6 +58,13 @@ public:
     using Between = std::function<void(uint32_t ms, bool frame)>;
     void run_ms();
     void set_between(Between b) { between_ = std::move(b); }
+    // (the battery, PerfGuard) the screen's frame() every this many device ms (15 by default; slower when nobody
+    // sees it, or for a Wasm core that can't keep up)
+    void set_frame_ms(uint32_t ms) { frame_ms_.store(ms < 15u ? 15u : ms, std::memory_order_relaxed); }
+    // (the engine, before each chunk) the audio is running low: a due frame() waits (idle instead), up to 200 ms,
+    // so a slow screen redraw never starves the sound
+    void set_behind(bool b) { behind_ = b; }
+    uint32_t frames_deferred() const { return deferred_; }
     uint32_t take_s16(int16_t *stereo, uint32_t max_frames);
     void discard() { ring_r_ = ring_w_; }   // drop what nobody took (the timer clock)
     // n host frames at host_rate (the device runs as far as needed; bypassed at exactly 44100)
@@ -69,7 +77,9 @@ public:
     // frame()'s time: the longest since reset_frame_stats, and the last (ticks: ns, rfm::nowTicks)
     uint64_t frame_ticks_max() const { return frame_max_; }
     uint64_t frame_ticks_last() const { return frame_last_; }
-    void reset_frame_stats() { frame_max_ = 0; }
+    void reset_frame_stats() { frame_max_ = 0; frame_sum_ = 0; frames_drawn_ = 0; deferred_ = 0; }
+    uint64_t frame_ticks_sum() const { return frame_sum_; }    // (Android) since reset_frame_stats
+    uint32_t frames_drawn() const { return frames_drawn_; }
 
     static constexpr uint32_t RING = 8192;  // stereo frames
 
@@ -79,6 +89,7 @@ private:
     CoreBackend &b_;
     bool booted_ = false;
     uint32_t dev_ms_ = 0, last_frame_ = 0;
+    std::atomic<uint32_t> frame_ms_{15};
     uint64_t frames_done_ = 0;
     int32_t enc_total_[FM1P_NE - 1] = {};
     int16_t ring_[RING * 2];
@@ -87,6 +98,10 @@ private:
     double rs_rate_ = 0;
     uint64_t frame_max_ = 0, frame_last_ = 0;
     uint32_t at_ = 0;
+    bool behind_ = false;
+    uint32_t deferred_ = 0;
+    uint64_t frame_sum_ = 0;
+    uint32_t frames_drawn_ = 0;
     Between between_;
 };
 

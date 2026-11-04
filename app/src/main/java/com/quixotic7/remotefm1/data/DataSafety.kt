@@ -189,7 +189,10 @@ class DataSafety(
     /** (Back up everything) every key's saved memory as it is now (the player saves the running one first) */
     fun currentFlashes(keys: List<String>): List<Backup.Current> = keys.mapNotNull { k ->
         val f = firmwareOf(k) ?: return@mapNotNull null
-        val d = FlashFile.read(flashFile(k), 0).data ?: return@mapNotNull null
-        Backup.Current(f.firmwareID, f.name, f.kind, f.version, f.sha256, d)
+        val file = flashFile(k)
+        val d = FlashFile.read(file, 0).data ?: return@mapNotNull null
+        // (iOS 9494ebe: the versions of an imported firmware share one memory: the version that last wrote it)
+        val v = FlashFile.meta(file)?.version ?: ""
+        Backup.Current(f.firmwareID, f.name, f.kind, v.ifEmpty { f.version }, f.sha256, d)
     }
 }

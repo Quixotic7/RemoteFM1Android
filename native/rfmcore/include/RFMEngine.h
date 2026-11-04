@@ -138,6 +138,27 @@ void rfme_midi_out_enable(rfme_t *e, int on);
 // it; any thread but the audio callback (serialised with rfme_midi_in). 1: queued; 0: not one SysEx message, or no
 // room now (try again shortly)
 int rfme_sysex_in(rfme_t *e, const uint8_t *data, uint32_t len);
+// (the battery, PerfGuard) the core's screen drawn (frame()) every `ms` device ms: 15 by default, slower when nobody
+// sees it or when a Wasm core can't keep up; any thread (iOS dfbc827, 3828820)
+void rfme_set_frame_ms(rfme_t *e, uint32_t ms);
+// (any thread) the core thread at audio priority (1, the default: SCHED_FIFO or nice -19), or an ordinary thread at
+// nice -19 (0): for an interpreted core, whose screen redraws overrun any real-time budget (iOS 14c9b96)
+void rfme_set_realtime(rfme_t *e, int on);
+
+// ---- (ain1) live audio input for an .rfm1 that lists it (RemoteFM1 web/engine/API.md section 6; iOS 23bba90, c47ac4f)
+// the running core: 0 takes no input; 1 its manifest "wants" ain1; 2 "needs" it
+int rfme_ain_mode(rfme_t *e);
+// (any thread) input live (1) or off (0); latency_frames: the round trip at 44.1 kHz, 0 unknown (the core gets
+// rfm1_audio_in_info on a change); target_frames: the input ring's level (its own delay, part of the round trip; 0
+// keeps it)
+void rfme_ain_set(rfme_t *e, int state, uint32_t latency_frames, uint32_t target_frames);
+// (the host's input thread) interleaved stereo int16 at 44.1 kHz
+void rfme_ain_push(rfme_t *e, const int16_t *stereo, uint32_t frames);
+// (the host's real-time input thread) float input at its own rate, resampled to 44.1 kHz (linear) into the ring;
+// right nullptr: mono, on both channels. No allocation, no locks
+void rfme_ain_push_f32(rfme_t *e, const float *left, const float *right, uint32_t frames, double rate);
+// frames given as silence because none had come, frames dropped (the ring full, or fallen behind)
+void rfme_ain_stats(rfme_t *e, uint32_t *short_frames, uint32_t *dropped_frames);
 // the render thread, after rfme_render_midi: one USB-MIDI packet of the core's that falls in the frames that render
 // played; 0: none. _at also gives its frame in that render (the same latency as the audio)
 int rfme_midi_out_take(rfme_t *e, uint32_t *pkt);
@@ -255,15 +276,23 @@ typedef struct {
     uint32_t core_avg_us, core_max_us;     // the core thread's time per render
     uint32_t core_load_pct;     // the core thread's time over the audio's duration
     uint32_t frame_max_us;      // the longest frame() (the firmware's screen redraw)
-    int32_t realtime;           // the core thread's priority: 1 SCHED_FIFO, 2 nice -19, 0 neither
+    int32_t realtime;           // the core thread's priority: 1 SCHED_FIFO, 2 nice -19, 3 ordinary at nice -19
+                                // (rfme_set_realtime 0: a Wasm core), 0 none of them
     int32_t workgroup;          // (iOS's audio workgroup: always 0 here)
     uint32_t workgroup_joins;
     char kind[8];               // (M7) the backend: "native" (a slot), "wasm" (an .rfm1 in wasm3), "" none
     // (M8) MIDI messages the learned map took; learn took; passed on to the core's midi_in (host and controller)
     uint32_t midi_mapped, midi_learned, midi_to_core;
+    // (the app's background policy) the device ms of the last chunk with sound above -60 dBFS (the audio clock's)
+    uint32_t last_sound_ms;
+    // (Android) frame() calls since the reset, their average time, calls deferred while the ring was low; the period
+    uint32_t frames_drawn, frame_avg_us, frames_deferred, frame_ms;
+    int32_t perf_hint;          // (Android 13+) the core thread reports its work to ADPF (1), or the device has none
 } rfme_status_t;
 void rfme_status(rfme_t *e, rfme_status_t *st);
 void rfme_reset_render_stats(rfme_t *e);
+// (tests) the core thread's every chunk takes `factor` times as long (a busy wait after it): a slower phone's CPU
+void rfme_test_slowdown(rfme_t *e, float factor);
 // the LCD last published (any thread but the clock's): if its number differs from `have`, copied as RGBA8888
 // (240 x 240 x 4) into rgba; returns its number (0: none yet)
 uint32_t rfme_preview(rfme_t *e, uint32_t have, uint8_t *rgba);

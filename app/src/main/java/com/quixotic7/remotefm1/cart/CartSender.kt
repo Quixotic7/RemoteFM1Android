@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // Ported from RemoteFM1IOS edf2039 RFMKit/Sources/RFMKit/Cart/CartSender.swift (and CartTransport+App.swift's
-// factory); changes: Kotlin, one StateFlow (CartState), suspend functions; a transport whose port the panel's link
+// factory), updated to d629aa0 (dc771c8: RemoteFM1 in the app as a target; bd0711a + 41e8471: CartKeep, the one-way
+// bank copy to the FM-1); changes: Kotlin, one StateFlow (CartState), suspend functions; a transport whose port the panel's link
 // holds (Android: an input port is one client's at a time, CartTransport.sharesPanelPort) gets BANKS and NAME inside a
 // pause too, and is told when an operation is over (done()) so it can close the port before the panel starts again.
 // Sends DX7 cartridges to an FM-1 running RemoteFM1 0.3.0 or later, which keeps each as a user bank. The firmware
@@ -112,12 +113,27 @@ data class CartState(
     val banks: BankList? = null,
     /** the slots the last send's dumps went to (STORED) */
     val storedSlots: List<Int> = emptyList(),
+    /** the last bank copy's outcome */
+    val lastSync: CartSender.SyncReport? = null,
 ) {
     val carts: List<DX7Cart> get() = files.flatMap { it.carts }
     val busy: Boolean get() = state is CartSender.State.Sending || state is CartSender.State.Working
 
     /** the port to send to: the only one, or the one picked (null: none, or several and none picked) */
     val target: CartPort? get() = if (ports.size == 1) ports[0] else ports.firstOrNull { it.id == chosen }
+
+    /** the target is RemoteFM1 running in the app (CoreCartTransport), not an FM-1 */
+    val inApp: Boolean get() = target?.id == CoreCartTransport.PORT.id
+
+    /** the ports a bank copy works between: RemoteFM1 in the app and an FM-1 (the one chosen, else the first); null:
+     *  not both */
+    val syncPair: Pair<CartPort, CartPort>?
+        get() {
+            val a = ports.firstOrNull { it.id == CoreCartTransport.PORT.id } ?: return null
+            val devices = ports.filter { it.id != a.id }
+            val d = devices.firstOrNull { it.id == chosen } ?: devices.firstOrNull() ?: return null
+            return a to d
+        }
 
     val resultText: String?
         get() = when (val s = state) {
@@ -204,7 +220,10 @@ class CartSender(
         _state.update { it.copy(files = emptyList(), state = State.Idle) }
     }
 
-    fun choose(portId: String?) = _state.update { it.copy(chosen = portId) }
+    // (another target: its banks)
+    fun choose(portId: String?) = _state.update {
+        if (it.chosen == portId) it else it.copy(chosen = portId, firmware = Firmware.unknown, banks = null)
+    }
 
     fun rescan() {
         val ports = transport.ports()
@@ -264,6 +283,11 @@ class CartSender(
 
     /** the panel let go of the FM-1 for [work], then started again; the list read again while still paused */
     private suspend fun paused(port: CartPort, listAfter: Boolean = true, work: suspend () -> String?): String? {
+        if (port.id == CoreCartTransport.PORT.id) {             // (RemoteFM1 in the app: no link to let go of)
+            val failure = work()
+            if (listAfter && s.firmware == Firmware.v031) list(port)
+            return failure
+        }
         val restart = panel?.pauseForCart() ?: false
         try {
             clock.sleep(timing.afterPause)
@@ -315,7 +339,63 @@ class CartSender(
         if (r == null || r.size < 3) return "the FM-1 didn't confirm it. Check its screen."
         SAInfo.words(r[2].toInt() and 0xFF)?.let { return it }
         _state.update { it.copy(storedSlots = it.storedSlots + (r[1].toInt() and 0xFF)) }
+        CartKeep.keep(c)                                    // (a copy, for copying the bank elsewhere: CartKeep)
         return null
+    }
+
+    // ---- the bank copy (RemoteFM1 in the app to an FM-1)
+
+    data class SyncReport(
+        val copied: Map<String, List<String>> = emptyMap(), // target name -> the banks copied there
+        val both: Int = 0,                                  // banks already on both
+        val noCopy: List<String> = emptyList(),             // banks the app has no copy of (put there another way)
+        val full: List<String> = emptyList(),               // banks not copied: the FM-1 has no free slot
+        val failed: String? = null,
+    )
+
+    /**
+     * every bank RemoteFM1 in the app has and the FM-1 doesn't copied to the FM-1 (from the app's kept copies,
+     * CartKeep), with its name. One way (the owner: sounds are made in the app, not on the FM-1); the FM-1's own banks
+     * are left alone
+     */
+    suspend fun sync() {
+        if (busy) return
+        rescan()
+        val (a, d) = s.syncPair ?: run { set(State.Failed("Run RemoteFM1 in the app and connect an FM-1 to sync.")); return }
+        val back = s.chosen
+        set(State.Working("Reading both bank lists…"))
+        val la = if (list(a)) s.banks else null
+        if (la == null) { set(State.Failed("RemoteFM1 in the app didn't list its banks.")); return }
+        var r = SyncReport()
+        val failure = paused(d, listAfter = false) {
+            val ld = if (list(d)) s.banks else null
+            if (ld == null) return@paused "The FM-1 didn't list its banks: it needs RemoteFM1 0.3.1 or later."
+            r = r.copy(both = la.banks.count { b -> ld.banks.any { it.crc == b.crc } })
+            var dst: BankList = ld
+            val copied = mutableListOf<String>()
+            for (b in la.banks.filter { b -> dst.banks.none { it.crc == b.crc } }) {
+                val c = CartKeep.cart(b.crc)
+                if (c == null) { r = r.copy(noCopy = r.noCopy + b.name); continue }
+                if (dst.banks.size >= dst.max) { r = r.copy(full = r.full + b.name); continue }
+                set(State.Working("Copying ${b.name} to ${d.name}…"))
+                _state.update { it.copy(storedSlots = emptyList()) }
+                dump(c, d)?.let { r = r.copy(failed = "${b.name} to ${d.name}: $it"); return@paused null }
+                val slot = s.storedSlots.firstOrNull()
+                val body = slot?.let { nameBody(it, b.name) }
+                if (body != null) {
+                    ask(body, d, timing.reply)                  // (its name as on the other side)
+                    clock.sleep(timing.nameSettle / 6)
+                }
+                copied += b.name
+                if (list(d)) s.banks?.let { dst = it }
+            }
+            if (copied.isNotEmpty()) r = r.copy(copied = mapOf(d.name to copied))
+            null
+        }
+        if (failure != null) r = r.copy(failed = failure)
+        _state.update { it.copy(chosen = back, firmware = Firmware.unknown, lastSync = r) }
+        s.target?.let { t -> if (t.id == CoreCartTransport.PORT.id || !transport.sharesPanelPort) list(t) }
+        set(r.failed?.let { State.Failed(it) } ?: State.Done(syncText(r)))
     }
 
     /** replaces the bank in [slot] with the file's cartridge (it must hold exactly one): TARGET, the dump, STORED */
@@ -409,6 +489,19 @@ class CartSender(
     }
 
     companion object {
+        fun syncText(r: SyncReport): String {
+            val s = mutableListOf<String>()
+            for ((to, names) in r.copied.toSortedMap()) {
+                s += "Copied ${names.size} bank${if (names.size == 1) "" else "s"} to $to: ${names.joinToString(", ")}."
+            }
+            if (s.isEmpty() && r.noCopy.isEmpty() && r.full.isEmpty()) s += "Both have the same banks."
+            if (r.both > 0) s += "${r.both} already on both."
+            if (r.noCopy.isNotEmpty()) s += "Not copied, the app has no copy of: ${r.noCopy.joinToString(", ")}. Send their " +
+                ".syx files once to RemoteFM1 in this app from this page and they can be copied."
+            if (r.full.isNotEmpty()) s += "No free slot for: ${r.full.joinToString(", ")}."
+            return s.joinToString(" ")
+        }
+
         /** NAME's request body for [name] (1..10 printable ASCII; anything else a space, as the firmware does; null: blank) */
         fun nameBody(slot: Int, name: String): ByteArray? {
             val n = name.toByteArray(Charsets.UTF_8).map { val c = it.toInt() and 0xFF; if (c in 0x20..0x7E) c else 0x20 }.take(10)

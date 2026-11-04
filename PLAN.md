@@ -229,3 +229,64 @@ releases, as on iOS.
   mid-range Android phones are slower. The app shows a note for a firmware too heavy for the device, as on iOS.
 - Keeping two apps in step: every iOS change after build 15 needs a matching Android change. A file-by-file map of
   iOS → Android sources (in README) makes that easier.
+
+## 10. Firmware library and catalog, caught up with iOS (2026-11-04)
+
+From RemoteFM1IOS d629aa0 (fe93170, e91d519, 9494ebe, 836a983, 3828820, d88353e, ac7254d, a67b1cf, 3ea5b25):
+
+- **RemoteFM1FW's catalog** is a third feed (catalog/catalog.json): its tag, description, editor and port always win;
+  its screenshots are kept in files/Thumbs/catalog (offline), fetched again for a new release, shown before the
+  shipped and captured thumbnails.
+- **Lists:** only each firmware's newest version (FirmwareListing); sort by Name / Recently used / Recently updated
+  (release dates from every RemoteFM1FW release, versions.json); the big Get more firmware button; the firmware
+  sidebar, a swipe in from the left edge (a 200 dp band kept from the back gesture).
+- **Get firmware:** thumbnails, All / Not installed / Recently updated, Update all (stoppable), a same-version rebuild
+  offered as "Get the new build", a firmware's older versions.
+- **Another device:** Settings › Send to another device… makes one .rfm1transfer (iOS's bytes: either app opens the
+  other's); opened, everything is imported and the From another device page loads each current memory with one tap.
+  A newer version's state offers "Switch to / Get <version> and load"; an older version's loads plainly.
+- **Launch notice:** release/android.json (set `build` to the new versionCode at each release) or an update of
+  RemoteFM1's own firmware: one dialog, closed until something newer comes. The "updatenotice" extra forces it.
+
+## 11. Engine speed and audio input (E, 2026-11-04; iOS 836a983, 3828820, 14c9b96, dfbc827, 23bba90, c5d5556, c47ac4f)
+
+- **PerfGuard** (PerfGuard.kt, AppModel.refresh): a Wasm core redraws every 33 ms with 12 ms of headroom; on
+  dropouts each ~2 s window the headroom doubles (to 40 ms) and the screen slows to 50, then 66 ms; kept per firmware
+  for the app's run. Its thread leaves the audio priority for an ordinary one at nice -19 (rfme_set_realtime 0;
+  Android apps rarely get SCHED_FIFO, so this changes little here). frame() waits (up to 200 ms) while the ring is
+  under half its target; the load is counted per chunk. The "too heavy" note on the Firmware page.
+- **Android only:** the core thread reports each wake's work to ADPF (APerformanceHint, Android 13+), so the CPU
+  speeds up before the sound is late (status `perf_hint`; the emulator has none). Diagnostics: core thread, screen
+  (frame() avg/max, redraws, waits), audio input.
+- **Battery hooks:** RfmEngine.setFrameMs (the slower of it and PerfGuard's), status `last_sound_ms`.
+- **Measured** (PerfTest, scripts/emu_perftest.sh; the emulator's output has 20 ms bursts, so BUFFER=192 paces a
+  phone-sized callback and SLOW=3/5 stretches the core thread's work like a mid-range tablet's CPU): Rainbow Mode
+  298 -> 14 dropouts in 12 s at 3x (7.3 % -> 0.2 % silence), 562 -> 71 at 5x; Ravel 133 -> 2, JIANT 91 -> 25, X0X
+  40 -> 0 at 5x; what is left falls in the first window, before PerfGuard has learnt the firmware. Latency 12 -> 17 ms
+  (29-45 ms for a firmware that needed more).
+- **ain1:** the engine's input ring and exports, an Oboe input (RFMOboeInput.cpp: AAudio, unprocessed, resampled to
+  44.1 kHz in the engine), RECORD_AUDIO asked on turning it on, on and the input kept per firmware (iOS's keys
+  ain.on.<id>, ain.port.<id>: here an AudioDeviceInfo id), Firmware page › Audio input. No AU on Android (b91ee30
+  skipped). Recording in the background would need a microphone foreground-service type: not done.
+
+### Editors, cartridges, the battery, menus (agent G, 2026-11-04)
+
+From RemoteFM1IOS d629aa0 (f47cdd4, 95d5d16, f02182b, 1d88c11, eb3455c, e60d78a, f6e6eaa, 391497e, 14c9b96, dc771c8,
+bd0711a, 41e8471, dfbc827, e527b74):
+
+- **Editors:** always the author's page (the catalog's `editor`, https only, else ManagerList.authors), never
+  remotefm1.com's copies; the port is the catalog's `port`, else the app's list. The Web MIDI is injected into every
+  https page. The page's alert / confirm / prompt are dialogs; its file inputs open the app's picker in the folder last
+  picked from; its downloads (blob: too) go to the share sheet; new windows open in the browser; its console errors go
+  to the log (RFMManager); it may play sound untapped. The editor slides in from the right; a swipe in from the right
+  edge opens it; the back gesture or Done closes it. The screen reader (Charles Vestal's) for X0X, FoMni, AMB-1,
+  Polly, MONK-1, Mocky, CTL-1.
+- **RemoteFM1's editor** is the cartridge page: "RemoteFM1 in this app" (CoreCartTransport) is a target beside the
+  FM-1s while it runs; every cartridge sent is kept (CartKeep: Android/data/com.quixotic7.remotefm1/files/Cartridges)
+  and "Copy this app's banks to <FM-1>" copies the app's banks one way, with their names.
+- **The battery:** Settings › When you leave the app (Keep playing / Only with an FM-1 connected / Stop playing) and
+  Stop after 10 quiet minutes, checked every 15 s in the background; the screen redrawn every 250 ms there with no
+  FM-1; the notification is a media one with Pause (stops and saves) / Play / Stop.
+- **Menus:** pages read AppModel.coreRunning (set on change), not the 66 ms engine status (the Firmware page
+  recomposed 164 times in 12 s, now 0); the audio page's live lines recompose alone. Pickers open where their kind
+  last picked from (PickerFolder). The key range snaps to whole keys on release.

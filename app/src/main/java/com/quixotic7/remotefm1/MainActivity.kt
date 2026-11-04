@@ -45,7 +45,25 @@ class MainActivity : ComponentActivity() {
     internal lateinit var appUi: AppUi
     private var picking = AppUi.PICK_FIRMWARE
     // the document pickers (Add firmware…, Restore from backup…) and the Your data folder
-    private val pick = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> picked(uris) }
+    // (G, iOS PickerFolder) each picker opens where its kind last picked from
+    private val pick = registerForActivityResult(PickerFolder.Open({ PickerFolder.of(this, folderKey(picking)).initial })) { uris ->
+        if (uris.isNotEmpty()) PickerFolder.of(this, folderKey(picking)).remember(uris)
+        picked(uris)
+    }
+    // (G) a web editor's file input: the app's picker, in the folder last picked from
+    private var editorPicked: ((List<Uri>) -> Unit)? = null
+    private var editorMultiple = true
+    private val editorPick = registerForActivityResult(PickerFolder.Open({ PickerFolder.of(this, PickerFolder.EDITOR).initial })) { uris ->
+        val done = editorPicked
+        editorPicked = null
+        done?.invoke(if (editorMultiple) uris else uris.take(1))
+    }
+
+    private fun folderKey(kind: String) = when (kind) {
+        AppUi.PICK_BACKUP -> PickerFolder.RESTORE
+        AppUi.PICK_CART -> PickerFolder.CART
+        else -> PickerFolder.FIRMWARE
+    }
     private val folder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u ->
         if (u != null) appUi.appData.folderPicked(DataFolder.set(this, u))
     }
@@ -68,6 +86,13 @@ class MainActivity : ComponentActivity() {
         }
         appUi.pickFolder = { folder.launch(null) }
         appUi.share = { f, mime -> shareFile(f, mime) }
+        com.quixotic7.remotefm1.managers.ManagerBridge.picker = { multiple, done ->
+            editorPicked?.invoke(emptyList())
+            editorPicked = done
+            editorMultiple = multiple
+            runCatching { editorPick.launch(arrayOf("*/*")) }.onFailure { editorPicked = null; done(emptyList()) }
+        }
+        com.quixotic7.remotefm1.managers.ManagerBridge.share = { f, mime -> shareFile(f, mime) }
         appUi.appFm1.keepAwake = { on ->
             runOnUiThread {
                 if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -82,6 +107,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         model.mirrorSync()
+        model.battery.becameActive()                    // (G: the battery) back: the firmware runs again if it stopped
         com.quixotic7.remotefm1.folder.RemoteFolderHost.noteChanged()   // (files may have come into the RemoteFM1 folder)
     }
 
@@ -89,6 +115,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         model.didEnterBackground()
+        if (!isChangingConfigurations) model.battery.enteredBackground()   // (G: the battery's checks every 15 s)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -142,6 +169,12 @@ class MainActivity : ComponentActivity() {
     private fun open(i: Intent?) {
         if (i == null || i.action == Intent.ACTION_MAIN || i.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) return
         val uris = Incoming.uris(i)
+        // (F, iOS 9494ebe) a .rfm1transfer: everything imported, the From another device page
+        val xfer = uris.filter { com.quixotic7.remotefm1.ui.Transfers.isTransfer(Incoming.name(contentResolver, it)) || i.type == com.quixotic7.remotefm1.data.TransferFile.MIME }
+        if (xfer.isNotEmpty()) {
+            xfer.forEach { com.quixotic7.remotefm1.ui.Transfers.open(appUi, this, it) }
+            return
+        }
         val states = uris.filter { Incoming.name(contentResolver, it).lowercase().endsWith(".${StateFile.EXTENSION}") }
         if (states.isNotEmpty()) {
             var note = ""

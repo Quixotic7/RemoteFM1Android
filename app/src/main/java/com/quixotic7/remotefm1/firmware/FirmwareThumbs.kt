@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // Ported from RemoteFM1IOS edf2039 RFMKit/Sources/RFMKit/FirmwareThumbs.swift (FirmwareThumbs, ThumbCapture,
-// FirmwareInfo).
+// FirmwareInfo); updated to d629aa0 (fe93170: RemoteFM1FW's catalog images first).
 //
-// The firmware list's thumbnails. Shipped first: assets/thumbs/<firmwareID>.png (iOS's Resources/Thumbs, each
+// The firmware list's thumbnails. RemoteFM1FW's catalog first: the owner's screenshots, catalog/images/<id>.png, kept
+// in files/Thumbs/catalog/<id>.image by FirmwareStore's check (syncImages), so they show offline. Then shipped: assets/thumbs/<firmwareID>.png (iOS's Resources/Thumbs, each
 // firmware's LCD after a chord of white keys and PLAY). Others (a firmware the app doesn't know): its own LCD, captured
 // once it has run ~3 s after boot, as a 240x240 PNG in files/Thumbs/<firmwareID>.png. An all-black (or nearly) frame
 // isn't kept: the capture retries on the next frames up to ~10 s after the 3 s, then gives up until the firmware boots
@@ -37,10 +38,26 @@ class FirmwareThumbs(
 
     fun hasShipped(id: String): Boolean = synchronized(shippedIds) { shippedIds.getOrPut(id) { shipped(id) != null } }
 
-    fun exists(id: String): Boolean = hasShipped(id) || file(id).isFile
+    /** RemoteFM1FW's catalog image (any type BitmapFactory reads: PNG, JPEG, WebP) */
+    fun catalogFile(id: String): File =
+        File(File(dir, "catalog"), id.map { if (it.isLetterOrDigit() || it in "-_.") it else '_' }.joinToString("") + ".image")
 
-    /** the thumbnail's PNG bytes: the shipped one, else the captured one; null none */
-    fun png(id: String): ByteArray? = shipped(id) ?: file(id).takeIf { it.isFile }?.readBytes()
+    fun exists(id: String): Boolean = catalogFile(id).isFile || hasShipped(id) || file(id).isFile
+
+    /** which one is shown: "catalog", "shipped", "captured"; null none */
+    fun source(id: String): String? = when {
+        catalogFile(id).isFile -> "catalog"
+        hasShipped(id) -> "shipped"
+        file(id).isFile -> "captured"
+        else -> null
+    }
+
+    /** the thumbnail's image bytes: the catalog's, the shipped one, the captured one; null none */
+    fun png(id: String): ByteArray? = catalogFile(id).takeIf { it.isFile }?.let { runCatching { it.readBytes() }.getOrNull() }
+        ?: shipped(id) ?: file(id).takeIf { it.isFile }?.readBytes()
+
+    /** the tiles read again (new catalog images) */
+    fun reload() { _generation.value++ }
 
     /** the thumbnail as a Bitmap (Android) */
     fun bitmap(id: String): Bitmap? = png(id)?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }

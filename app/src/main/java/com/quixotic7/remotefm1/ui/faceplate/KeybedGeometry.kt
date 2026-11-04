@@ -7,6 +7,8 @@
 // above them). Shared by the drawing and the touch tracking, so a touch lands on the key that is drawn.
 package com.quixotic7.remotefm1.ui.faceplate
 
+import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
@@ -96,8 +98,15 @@ class KeybedGeometry(val size: PSize, val layout: Layout, stepMode: Boolean = fa
     /** the default scroll offset (four naturals in, around C4) */
     val defaultOffset: Float get() = min(maxOffset, 4f)
 
-    /** the offset that centres natural [i] */
-    fun offsetCentering(i: Int): Float = clamp(i - visible / 2 + 0.5f, 0f, maxOffset)
+    /** the offset that centres natural [i] (as near as whole keys allow; RemoteFM1IOS 391497e) */
+    fun offsetCentering(i: Int): Float = snap(i - visible / 2 + 0.5f)
+
+    /** an offset moved to the nearest whole key (no key cut in half at the left; the right end as far as it goes) */
+    fun snap(o: Float): Float {
+        val c = clamp(o, 0f, maxOffset)
+        val stops = floatArrayOf(floor(c), min(ceil(c), maxOffset), maxOffset)   // (the right end is a stop too)
+        return stops.minByOrNull { abs(it - c) } ?: c
+    }
 
     private fun local(px: Float, py: Float, offset: Float): Pair<Float, Float> =
         if (layout is Layout.Scroll) Pair(px - stage.minX - shift(offset), py - stage.minY) else Pair(px, py)

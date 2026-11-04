@@ -107,7 +107,14 @@ class AppFm1Pages(private val a: AppUi, ctx: Context, prefs: SharedPreferences, 
     var keepAwake: ((Boolean) -> Unit)? = null
     val installer: FirmwareInstaller = AppInstaller.shared(ctx, panel, device,
         InstallAwake({ keepAwake?.invoke(true) }, { keepAwake?.invoke(false) }), launch.installDemo)
-    val cart: CartSender = AppCartSender.shared(ctx, panel, device, launch.cartDemo)
+    // (dc771c8) RemoteFM1 running in the app is a cartridge target too: its SysEx in and MIDI out
+    val cart: CartSender = AppCartSender.shared(ctx, panel, device, launch.cartDemo, core = {
+        object : com.quixotic7.remotefm1.cart.CoreMidi {
+            override fun attach(on: Boolean) = a.model.midi.managerAttach(on)
+            override suspend fun send(bytes: ByteArray) = a.model.midi.managerSend(bytes)
+            override fun take() = a.model.midi.managerTake()
+        }
+    })
     val prompter = InstallPrompter(panel, installer, object : PromptMemory {
         override fun get(key: String) = prefs.getString(key, null)
         override fun set(key: String, value: String) { prefs.edit().putString(key, value).apply() }
@@ -118,7 +125,7 @@ class AppFm1Pages(private val a: AppUi, ctx: Context, prefs: SharedPreferences, 
             ?: installer.unitVersion?.toString()
     override val cartBusy get() = cart.busy
     override val installPage: @Composable (back: () -> Unit) -> Unit = { back -> InstallPage(a, installer, prompter, back) }
-    override val cartPage: @Composable (back: () -> Unit) -> Unit = { back -> CartPage(a, cart, back) }
+    override val cartPage: @Composable (back: () -> Unit) -> Unit = { back -> CartPage(a, cart, a.cartBackTitle, back) }
 
     /** a .syx opened with the app: added, the cartridge page opened */
     fun openSyx(ctx: Context, uri: android.net.Uri) {
@@ -345,8 +352,12 @@ fun InstallPromptCard(p: InstallPromptState.Prompt, install: () -> Unit, notNow:
 // ---------------------------------------------------------------- Send a DX7 cartridge
 
 @Composable
-private fun CartPage(a: AppUi, s: CartSender, back: () -> Unit) {
+private fun CartPage(a: AppUi, s: CartSender, backTitle: String, back: () -> Unit) {
     val st by s.state.collectAsState()
+    // (the target is RemoteFM1 running in the app, not an FM-1)
+    val toWhom = if (st.inApp) "RemoteFM1 in this app" else "the FM-1"
+    val where = if (st.inApp) "in RemoteFM1 (this app)" else "on the FM-1"
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { com.quixotic7.remotefm1.cart.AppCartSender.coreTransport?.close() } }
     val scope = rememberCoroutineScope()
     var shown by remember { mutableStateOf(st.files.lastOrNull()?.id) }
     var openBank by remember { mutableStateOf<Int?>(null) }
@@ -356,14 +367,14 @@ private fun CartPage(a: AppUi, s: CartSender, back: () -> Unit) {
         s.rescan()
         s.refresh()
     }
-    SheetPage("Send a DX7 cartridge", "Settings", back = { if (!s.busy) back() }) {
+    SheetPage("Send a DX7 cartridge", backTitle, back = { if (!s.busy) back() }) {
         SheetNote(if (st.firmware == CartSender.Firmware.v031)
             "RemoteFM1 keeps up to 16 DX7 32-voice cartridges (.syx) as user banks, USER1 to USER16, after the ROM banks. When all are used, a new one replaces the oldest. Installing other firmware erases them."
         else "RemoteFM1 0.3.0 keeps a DX7 32-voice cartridge (.syx) as a user bank, USER1 to USER3, after the ROM banks. A fourth replaces the oldest. Installing other firmware erases them.")
         // the banks on the FM-1
         val l = st.banks
         if (st.firmware == CartSender.Firmware.v031 && l != null) {
-            SheetSectionTitle("Banks on the FM-1: ${l.banks.size} of ${l.max}")
+            SheetSectionTitle("Banks $where: ${l.banks.size} of ${l.max}")
             if (l.banks.isEmpty()) SheetNote("None yet. A cartridge sent goes to USER${l.next + 1}.") else {
                 SheetList {
                     l.banks.forEachIndexed { k, b ->
@@ -372,7 +383,7 @@ private fun CartPage(a: AppUi, s: CartSender, back: () -> Unit) {
                         }
                         if (openBank == b.slot) Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (confirmRemove == b.slot) {
-                                Text("Remove ${b.label} (${b.name}) from the FM-1? This can't be undone.", style = ui(13))
+                                Text("Remove ${b.label} (${b.name}) from $toWhom? This can't be undone.", style = ui(13))
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     SheetButton("Remove", accent = true) { confirmRemove = null; openBank = null; scope.launch { s.delete(b.slot) } }
                                     SheetButton("Cancel") { confirmRemove = null }
@@ -439,7 +450,7 @@ private fun CartPage(a: AppUi, s: CartSender, back: () -> Unit) {
             SheetSectionTitle("Send to")
             SheetList {
                 st.ports.forEachIndexed { k, p ->
-                    SheetRow(p.name, value = if (p.bluetooth) "Bluetooth" else "USB", divider = k < st.ports.size - 1, chevron = false,
+                    SheetRow(p.name, value = if (p.id == com.quixotic7.remotefm1.cart.CoreCartTransport.PORT.id) "in the app" else if (p.bluetooth) "Bluetooth" else "USB", divider = k < st.ports.size - 1, chevron = false,
                              check = st.chosen == p.id) { s.choose(p.id) }
                 }
             }
@@ -457,14 +468,28 @@ private fun CartPage(a: AppUi, s: CartSender, back: () -> Unit) {
             else -> {
                 if (st.ports.isEmpty()) SheetNote("No FM-1 found. Connect it with USB (or Bluetooth MIDI).", Palette.orange)
                 Box(Modifier.padding(top = 4.dp)) {
-                    SheetButton(if (nCarts <= 1) "Send to the FM-1" else "Send $nCarts cartridges to the FM-1", accent = true,
+                    SheetButton(if (nCarts <= 1) "Send to $toWhom" else "Send $nCarts cartridges to $toWhom", accent = true,
                                 enabled = nCarts > 0 && st.target != null, tag = "cart-send") { scope.launch { s.send() } }
                 }
                 if (x !is CartSender.State.Done) st.resultText?.let { r ->
                     if (x is CartSender.State.Sent) Status(r, Palette.linkedDot) else SheetNote(r, Palette.orange)
                 }
-                SheetNote("The app's panel lets go of the FM-1 while it sends, then connects again.")
+                if (!st.inApp) SheetNote("The app's panel lets go of the FM-1 while it sends, then connects again.")
             }
+        }
+        // (bd0711a, 41e8471) RemoteFM1 in the app and an FM-1 both here: the app's banks copied to the FM-1
+        st.syncPair?.let { (_, dev) ->
+            SheetSectionTitle("Sync")
+            SheetButton("Copy this app's banks to ${dev.name}", enabled = !st.busy, tag = "cart-sync") { scope.launch { s.sync() } }
+            st.lastSync?.let { r ->
+                val text = r.failed ?: CartSender.syncText(r)
+                val x = st.state
+                if ((x is CartSender.State.Done && x.text == text) || (x is CartSender.State.Failed && x.text == text))
+                    if (r.failed == null) Status(text, Palette.linkedDot) else SheetNote(text, Palette.orange)
+            }
+            SheetNote("Copies each bank RemoteFM1 in this app has and the FM-1 doesn't to the FM-1, with its name. The " +
+                      "FM-1's own banks stay. RemoteFM1 can't send a bank back, so the app copies from the cartridges " +
+                      "it has sent (Android/data/com.quixotic7.remotefm1/files/Cartridges; a .syx put there counts too).")
         }
         if (s.simulated) SheetNote("A simulated FM-1: nothing is sent to a real one.", Palette.orange)
         Spacer(Modifier.height(4.dp))

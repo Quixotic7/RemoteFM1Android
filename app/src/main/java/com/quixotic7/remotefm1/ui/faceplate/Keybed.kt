@@ -140,10 +140,14 @@ fun KeybedView(theme: Theme, feed: PanelFeed, w: Float, h: Float, layout: Keybed
                                 setOffset(KeybedGeometry.clamp((c.position.x / density - g.pad) / mw * 16 - g.visible / 2, 0f, g.maxOffset))
                             }
                         }
-                        if (!moved) {
-                            val to = g.offsetCentering(g.stripIndex(last.x / density))
+                        // (a tap: centre that cell; let go after a drag: onto whole keys)
+                        run {
+                            val mw = g.size.w - 2 * g.pad
+                            val from = if (!moved) curOff
+                                       else KeybedGeometry.clamp((last.x / density - g.pad) / mw * 16 - g.visible / 2, 0f, g.maxOffset)
+                            val to = if (!moved) g.offsetCentering(g.stripIndex(last.x / density)) else g.snap(from)
                             scope.launch {
-                                anim.snapTo(curOff)
+                                anim.snapTo(from)
                                 anim.animateTo(to, tween(200)) { setOffset(value) }
                             }
                         }

@@ -24,6 +24,9 @@
     <!-- (A4) Get firmware: remotefm1.com's catalog and the RemoteFM1FW releases on GitHub -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- (ain1) a firmware's audio input: asked only when the user turns it on (Firmware page, Audio input) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
@@ -65,6 +68,26 @@
                 <data android:pathPattern=".*\\..*\\.rfm1state" />
                 <data android:pathPattern=".*\\..*\\..*\\.rfm1state" />
                 <data android:pathPattern=".*\\..*\\..*\\..*\\.rfm1state" />
+            </intent-filter>
+            <!-- (F, iOS 9494ebe) a .rfm1transfer (Send to another device) opened: our own shares' type, and the path
+                 patterns, as for .rfm1state (ui/Transfer.kt: Transfers.open) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/vnd.quixotic7.remotefm1.transfer" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\\.rfm1transfer" />
+                <data android:pathPattern=".*\\..*\\.rfm1transfer" />
+                <data android:pathPattern=".*\\..*\\..*\\.rfm1transfer" />
             </intent-filter>
             <!-- (A4) an .rfm1 firmware opened from a file manager, a browser's download or a share
                  (firmware/FirmwareCenter.kt: firmwareUri, open). Android has no type for .rfm1: the path patterns for

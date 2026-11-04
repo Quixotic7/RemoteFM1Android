@@ -2,7 +2,7 @@
 // Copyright (C) 2026 RemoteFM1 contributors
 // The sheet's page models on A4's firmware/ (FirmwareCenter: the catalog, thumbnails, Get firmware, Add firmware…,
 // delete) and A5's data/ (DataSafety through AppModel: states, safety copies, Reset, Back up everything, Restore),
-// and the Get firmware pages (RemoteFM1IOS edf2039 App/GetFirmware.swift: the list, a firmware's page).
+// (the Get firmware pages: GetFirmware.kt).
 package com.quixotic7.remotefm1.ui
 
 import android.content.Context
@@ -95,8 +95,15 @@ class AppFirmwarePages(private val a: AppUi) : FirmwarePagesModel {
         }
     }
 
+    // (F, iOS 836a983 / 3828820) each firmware's newest version only, in the chosen order (shownCores)
     override val entries: List<FirmwareEntry>
-        get() = m.catalog.map { FirmwareEntry(it.id, it.firmwareID, it.name, it.version, it.imported, it.license) }
+        get() = shownCores(a).map { FirmwareEntry(it.id, it.firmwareID, it.name, it.version, it.imported, it.license) }
+
+    /** (F) the catalog's images came: read again */
+    fun thumbsChanged() {
+        thumbs.clear()
+        thumbGen++
+    }
 
     override fun card(e: FirmwareEntry): FirmwareCard {
         val i: FirmwareInfo = fw.info(e.id) ?: return FirmwareCard(e.firmwareId, e.name, e.version, license = e.license)
@@ -148,202 +155,7 @@ class AppFirmwarePages(private val a: AppUi) : FirmwarePagesModel {
     }
 }
 
-/** a catalog entry is a Fantasy CFW: the installed file's manifest when it is here (it decides), else the catalog's flag */
-private fun fantasy(a: AppUi, e: AvailableFirmware): Boolean {
-    val lib = a.model.fw.library
-    val f = lib.files.value.firstOrNull { it.error == null && it.sha256.isNotEmpty() && it.sha256 == e.sha256 }
-    return if (f != null) lib.details(f.sha256).fantasy.virtual else e.virtual
-}
-
-/** Get firmware: the list, and a firmware's page (iOS GetFirmwarePage, CatalogDetailPage) */
-@Composable
-private fun GetFirmwarePages(a: AppUi, back: () -> Unit) {
-    val fw = a.model.fw
-    val store = fw.store
-    var open by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) { fw.pageOpened() }
-    val available by store.available.collectAsState()
-    val checking by store.checking.collectAsState()
-    val problem by store.problem.collectAsState()
-    val progress by store.progress.collectAsState()
-    val message by store.message.collectAsState()
-    val failure by store.failure.collectAsState()
-    val files by fw.library.files.collectAsState()
-    files.size
-    val builtIn = fw.catalog.value.filter { !it.imported }
-    val list = available.filter { !it.builtIn(builtIn) }
-    val notes: @Composable () -> Unit = {
-        if (failure.isNotEmpty()) SheetNote(failure, Palette.orange) else if (message.isNotEmpty()) SheetNote(message)
-    }
-    val o = open
-    val e = o?.let { id -> list.firstOrNull { it.id == id } }
-    if (o != null) {
-        if (e == null) {
-            SheetPage(o, "Get firmware", back = { open = null }) {
-                SheetNote(if (checking) "Getting the list…" else "This firmware isn't in the list any more.")
-            }
-            return
-        }
-        CatalogDetail(a, store, e, progress, notes) { open = null }
-        return
-    }
-    SheetPage("Get firmware", "Firmware", back = back) {
-        SheetSectionTitle("Available", top = 12)
-        if (list.isEmpty()) {
-            SheetNote(if (checking) "Getting the list…" else problem.ifEmpty { "No firmware to download yet." },
-                      if (problem.isEmpty() || checking) Palette.sheetMuted else Palette.orange)
-        } else {
-            SheetList {
-                list.forEachIndexed { i, it ->
-                    val st = store.state(it)
-                    Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).divider(i < list.size - 1).clickable { open = it.id }
-                        .padding(start = 16.dp, end = 10.dp, top = 10.dp, bottom = 10.dp).testTag("catalog-${it.id}"),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            BadgeLine(fantasy(a, it)) { Text(it.displayName + if (it.beta) "  BETA" else "", style = ui(15, 600), maxLines = 1) }
-                            if (it.summary.isNotEmpty()) Text(it.summary, style = ui(12, 500, Palette.sheetMuted2), maxLines = 2)
-                            Text(listOf(it.author, it.category, size(it.size)).filter { s -> s.isNotEmpty() && s != "–" }.joinToString(" · "),
-                                 style = ui(12, 400, Palette.sheetMuted), maxLines = 1)
-                        }
-                        CatalogAction(st, if (progress?.id == it.id) progress else null, progress != null,
-                                      install = { store.installAsync(it) }, cancel = { store.cancel() })
-                    }
-                }
-            }
-        }
-        notes()
-        SheetList(Modifier.padding(top = 16.dp)) {
-            SheetRow(if (checking) "Checking…" else "Check for updates", divider = false, chevron = false, enabled = !checking) {
-                store.refreshAsync()
-            }
-        }
-        if (problem.isNotEmpty() && list.isNotEmpty()) SheetNote(problem, Palette.orange)
-        SheetNote(footer(store))
-    }
-}
-
-private fun size(n: Long): String = when {
-    n <= 0 -> "–"
-    n < 1000 -> "$n bytes"
-    n < 1_000_000 -> "${(n + 500) / 1000} KB"
-    else -> "%.1f MB".format(n / 1_000_000.0)
-}
-
-private fun progressText(p: FirmwareStore.Progress): String =
-    p.fraction?.let { "Downloading… ${Math.round(it * 100)} %" } ?: "Downloading… ${size(p.received)}"
-
-private fun footer(store: FirmwareStore): String {
-    val names = store.feeds.map { it.name }
-    val from = "The list comes from ${if (names.size <= 1) names.joinToString() else names.dropLast(1).joinToString(", ") + " and " + names.last()}."
-    val c = store.checked
-    val whenText = if (c == null) " Not checked yet." else {
-        val ago = (Instant.now().epochSecond - c.epochSecond)
-        " Checked " + when {
-            ago < 60 -> "just now"
-            ago < 3600 -> "${ago / 60} min ago"
-            ago < 86400 -> "${ago / 3600} h ago"
-            else -> "${ago / 86400} days ago"
-        } + "."
-    }
-    return from + whenText + " Firmware built into the app isn't listed."
-}
-
-/** Install, Update, Installed, or the download's progress (a tap cancels) */
-@Composable
-private fun CatalogAction(state: InstallState, p: FirmwareStore.Progress?, busy: Boolean, install: () -> Unit, cancel: () -> Unit) {
-    if (p != null) {
-        Text("${p.fraction?.let { Math.round(it * 100) } ?: "…"} % ✕", Modifier.height(44.dp).clickable { cancel() }.padding(horizontal = 8.dp, vertical = 12.dp),
-             style = ui(13, 700, Palette.sheetAccent))
-        return
-    }
-    when (state) {
-        is InstallState.Installed -> Text("✓ Installed", Modifier.padding(horizontal = 6.dp), style = ui(13, 600, Palette.sheetMuted2))
-        else -> {
-            val accent = state is InstallState.Update
-            Box(Modifier.height(32.dp).clip(RoundedCornerShape(50)).background(if (accent) Palette.sheetAccent else Palette.sheetRaised)
-                .clickable(enabled = !busy) { install() }.padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
-                Text(if (accent) "Update" else "Install", style = ui(13, 700, if (accent) Palette.sheetBackground else Palette.sheetText))
-            }
-        }
-    }
-}
-
-@Composable
-private fun CatalogDetail(a: AppUi, store: FirmwareStore, e: AvailableFirmware, p: FirmwareStore.Progress?,
-                          notes: @Composable () -> Unit, back: () -> Unit) {
-    val m = a.model
-    val lib = m.fw.library
-    val state = store.state(e)
-    val mine = lib.files.value.filter { it.error == null && (it.coreID == e.id || it.sha256 == e.sha256) }
-    val here = mine.filter { it.coreID == e.id }.maxByOrNull { it.version }
-    val uri = LocalUriHandler.current
-    var asking by remember(e.id) { mutableStateOf(false) }
-    SheetPage(e.displayName, "Get firmware", back = back) {
-        if (fantasy(a, e)) Box(Modifier.padding(bottom = 6.dp)) { FantasyBadge() }
-        Text(listOf(e.version, if (e.beta) "BETA" else "", if (e.author.isNotEmpty()) "· ${e.author}" else "").filter { it.isNotEmpty() }.joinToString(" "),
-             style = ui(15, 600, Palette.sheetMuted2))
-        val text = e.about.ifEmpty { e.summary }
-        if (text.isNotEmpty()) Text(text, Modifier.padding(top = 12.dp), style = ui(14))
-        Column(Modifier.padding(top = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (p != null) {
-                LinearProgressIndicator(progress = { (p.fraction ?: 0.0).toFloat() }, Modifier.fillMaxWidth(), color = Palette.sheetAccent,
-                                        trackColor = Palette.sheetRaised)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(progressText(p), Modifier.weight(1f), style = ui(13, 600, Palette.sheetMuted2))
-                    SheetButton("Cancel") { store.cancel() }
-                }
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    when (state) {
-                        InstallState.NotInstalled -> SheetButton("Install · ${size(e.size)}", accent = true, tag = "catalog-install") { store.installAsync(e) }
-                        is InstallState.Update -> {
-                            SheetButton("Update to ${e.version}", accent = true) { store.installAsync(e) }
-                            Text("${state.version} is here", style = ui(13, 500, Palette.sheetMuted2))
-                        }
-                        is InstallState.Installed -> {
-                            val f = here ?: lib.files.value.firstOrNull { it.error == null && it.sha256 == e.sha256 }
-                            if (f != null) SheetButton("Play ${f.name}", accent = true, tag = "catalog-play") {
-                                m.refreshCatalog()
-                                m.select(f.key)
-                                if (m.mode != Mode.CORE) m.useMode(Mode.CORE)
-                                a.page = SheetPageId.FIRMWARE
-                            }
-                            Text("✓ Installed ${state.version}", style = ui(13, 600, Palette.sheetMuted2))
-                        }
-                    }
-                }
-                if (state is InstallState.Update) SheetNote("The update replaces the version here. Saved sounds and projects that used it open with the new one.")
-                if (mine.isNotEmpty()) {
-                    val what = if (mine.size == 1) "${mine[0].name} ${mine[0].version}" else "${mine.size} versions"
-                    SheetList {
-                        if (asking) SheetConfirmRow("Delete $what from this ${a.deviceWord}?", "Delete", { asking = false }) {
-                            asking = false
-                            mine.forEach { f -> a.firmware.delete(FirmwareEntry(f.key, f.coreID, f.name, f.version, true))?.invoke() }
-                        } else SheetRow("Delete $what…", divider = false, chevron = false) { asking = true }
-                    }
-                }
-            }
-        }
-        notes()
-        SheetSectionTitle("Details")
-        SheetList {
-            val rows = listOfNotNull("Version" to e.version, e.author.takeIf { it.isNotEmpty() }?.let { "Author" to it },
-                                     e.category.takeIf { it.isNotEmpty() }?.let { "Category" to it },
-                                     "Licence" to e.license.ifEmpty { "In the file" }, "Size" to size(e.size),
-                                     state.installedVersion?.let { "On this device" to it },
-                                     "SHA-256" to if (e.sha256.isEmpty()) "–" else e.sha256.take(16) + "…")
-            rows.forEachIndexed { i, (k, v) -> SheetRow(k, value = v, divider = i < rows.size - 1, chevron = false) {} }
-        }
-        val links = listOf("Source code" to e.sourceURL, "Website" to e.site).filter { it.second.startsWith("http") }
-        if (links.isNotEmpty()) SheetList(Modifier.padding(top = 12.dp)) {
-            links.forEachIndexed { i, (k, u) ->
-                SheetRow(k, value = android.net.Uri.parse(u).host, divider = i < links.size - 1) { runCatching { uri.openUri(u) } }
-            }
-        }
-        SheetNote("From ${e.downloads.map { it.feed }.toSortedSet().joinToString(" and ")}. Before it's added, the file is checked " +
-                  "against its size and SHA-256, and by the app's .rfm1 loader. It runs only when you pick it.")
-    }
-}
+// (Get firmware's pages: GetFirmware.kt)
 
 // ---------------------------------------------------------------- A5: data
 
@@ -364,7 +176,8 @@ class AppDataPages(private val a: AppUi, private val ctx: Context) : DataPagesMo
             byId.clear()
             return l.map { s ->
                 byId[s.id] = s
-                StateItem(s.id, s.name, (s.date * 1000).toLong(), s.version, s.versionNote(running), s.loadQuestion(running))
+                StateItem(s.id, s.name, (s.date * 1000).toLong(), s.version, s.versionNote(running), s.loadQuestion(running),
+                          s.loadAction(running), Transfers.otherVersion(a, s))
             }
         }
 
@@ -388,6 +201,10 @@ class AppDataPages(private val a: AppUi, private val ctx: Context) : DataPagesMo
         }
     }
     override fun restore(s: SafetyItem) { snaps[s.id]?.let { m.restoreCopy(it) } }
+    // (F, iOS 9494ebe) a newer version's state into its own version; Send to another device…
+    override fun loadOtherVersion(s: StateItem) { byId[s.id]?.let { st -> Transfers.loadAnywhere(a, st) { m.showMessage(it) } } }
+    private var sending by mutableStateOf(false)
+    override val sendTransfer: (() -> Unit) = { if (!sending) Transfers.send(a, ctx, { sending = it }) { note = it } }
     override fun reset() = m.resetFlash()
 
     override fun backUp() {
@@ -437,6 +254,7 @@ class AppDataPages(private val a: AppUi, private val ctx: Context) : DataPagesMo
             val other = ArrayList<Pair<String, ByteArray>>()
             for (u in uris) runCatching {
                 val name = com.quixotic7.remotefm1.data.Incoming.name(cr, u)
+                if (Transfers.isTransfer(name)) { Transfers.open(a, ctx, u); return@runCatching }     // (F: a transfer file)
                 val d = com.quixotic7.remotefm1.data.Incoming.read(cr, u)
                 if (com.quixotic7.remotefm1.data.Incoming.isZip(name, d)) all.add(Backup.restoreZip(d.inputStream(), m.stateLib))
                 else other.add(name to d)

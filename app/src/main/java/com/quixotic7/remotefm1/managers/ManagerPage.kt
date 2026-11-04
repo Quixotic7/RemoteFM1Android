@@ -1,26 +1,41 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
-// Ported from RemoteFM1IOS edf2039 RFMKit/Sources/RFMKit/Managers/ManagerPage.swift
-// The firmware's own web manager in the app: remotefm1.com's hosted page in a full-screen WebView, with a whole Web
-// MIDI injected at document start (iOS's script; androidx.webkit's addDocumentStartJavaScript, only for
-// https://remotefm1.com; where the WebView can't, it is injected when the page starts). The page's MIDI comes to
-// ManagerBridge (a @JavascriptInterface "fm1mgr" that answers only while the page is on remotefm1.com over https):
-// to the running firmware (AppMidi.managerSend, in the page's order); the firmware's back to the page
-// (managerTake, every 10 ms). Opening it keeps a safety copy first ("before manager write"): a manager may write a
-// whole bank. Links to other sites open in the browser.
+// Ported from RemoteFM1IOS d629aa0 RFMKit/Sources/RFMKit/Managers/ManagerPage.swift (f47cdd4, eb3455c, e60d78a,
+// 14c9b96, dc771c8, bd0711a, 41e8471)
+// A firmware's own web editor in the app, at its author's page, in a WebView with a whole Web MIDI injected at
+// document start (iOS's script; androidx.webkit's addDocumentStartJavaScript, every https page; where the WebView
+// can't, it is injected when the page starts). The page's MIDI comes to ManagerBridge (a @JavascriptInterface
+// "fm1mgr" that answers only while the main frame is an https page): to the running firmware (AppMidi.managerSend, in
+// the page's order); the firmware's back to the page (managerTake, every 10 ms). Opening it keeps a safety copy first
+// ("before manager write"): an editor may write a whole bank. The page's alert / confirm / prompt are real dialogs
+// (WebChromeClient: without them confirm() was a Cancel, so "Place all" did nothing); its file inputs open the app's
+// picker in the folder last picked from (PickerFolder.EDITOR); its downloads (blob: and data: too) go to the share
+// sheet; links to new windows open in the browser; its console errors go to the log ("RFMManager"); it may play sound
+// without a tap (the screen reader's voice). Android: the system back gesture closes it, as Done does.
 package com.quixotic7.remotefm1.managers
 
 import android.annotation.SuppressLint
+import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.Message
+import android.util.Base64
 import android.util.Log
+import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
+import android.webkit.URLUtil
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.EditText
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -41,6 +56,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.quixotic7.remotefm1.AppModel
+import com.quixotic7.remotefm1.PickerFolder
 import com.quixotic7.remotefm1.data.FlashHistory
 import com.quixotic7.remotefm1.ui.sheet.SheetButton
 import com.quixotic7.remotefm1.ui.sheet.ui
@@ -52,9 +68,10 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 @Composable
-fun ManagerPage(model: AppModel, url: String, port: String, firmware: String, done: () -> Unit) {
+fun ManagerPage(model: AppModel, url: String, port: String, firmware: String, title: String? = null, done: () -> Unit) {
     val bridge = remember(url) { ManagerBridge(model, port, firmware) }
     DisposableEffect(bridge) {
         bridge.attach()
@@ -63,7 +80,7 @@ fun ManagerPage(model: AppModel, url: String, port: String, firmware: String, do
     Column(Modifier.fillMaxSize().background(Palette.sheetBackground).safeDrawingPadding()) {
         Row(Modifier.fillMaxWidth().background(Palette.sheetBackground).padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Text("$firmware editor", style = ui(17, 700))
+            Text(title ?: "$firmware editor", style = ui(17, 700))
             Spacer(Modifier.weight(1f))
             SheetButton("Done", accent = true, tag = "manager-done", action = done)
         }
@@ -86,7 +103,17 @@ class ManagerBridge(private val model: AppModel, private val port: String, priva
         private set
     @Volatile var received = 0
         private set
+    /** tests: the page's dialogs shown (alert / confirm / prompt) and its last download's name */
+    @Volatile var dialogs = 0
+        private set
+    @Volatile var lastDownload: String? = null
+        private set
+    /** tests: the page's dialog on screen, to answer it */
+    @Volatile var lastDialog: AlertDialog? = null
+        private set
     private var injected = false
+    private var cacheDir: File? = null
+    private var choosing: ValueCallback<Array<Uri>>? = null
 
     private val poll = object : Runnable {
         override fun run() {
@@ -106,6 +133,8 @@ class ManagerBridge(private val model: AppModel, private val port: String, priva
         main.removeCallbacks(poll)
         model.midi.managerAttach(false)
         scope.cancel()
+        choosing?.onReceiveValue(null)
+        choosing = null
         web?.let {
             it.removeJavascriptInterface("fm1mgr")
             it.destroy()
@@ -118,24 +147,26 @@ class ManagerBridge(private val model: AppModel, private val port: String, priva
         get() = WEB_MIDI.replace("%STATE%", JSONObject().put("port", port).put("firmware", firmware).toString())
 
     @SuppressLint("SetJavaScriptEnabled")
-    fun makeView(ctx: android.content.Context, url: String): WebView {
+    fun makeView(ctx: Context, url: String): WebView {
         val w = WebView(ctx)
         web = w
+        cacheDir = ctx.cacheDir
         w.setBackgroundColor(android.graphics.Color.BLACK)
         w.settings.javaScriptEnabled = true
         w.settings.domStorageEnabled = true
         w.settings.allowFileAccess = false
-        w.settings.allowContentAccess = false
+        w.settings.allowContentAccess = true                 // (the picker's content: files for the page's inputs)
+        w.settings.mediaPlaybackRequiresUserGesture = false  // (the screen reader speaks what MIDI brings, untapped)
+        w.settings.setSupportMultipleWindows(true)           // (new windows: onCreateWindow, the browser)
         w.addJavascriptInterface(Js(), "fm1mgr")
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-            WebViewCompat.addDocumentStartJavaScript(w, script, setOf("https://${ManagerList.HOST}"))
+            WebViewCompat.addDocumentStartJavaScript(w, script, setOf("*"))
             injected = true
         }
         w.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, r: WebResourceRequest): Boolean {
                 if (ManagerList.trusted(r.url.toString())) return false
-                // (another site: the browser)
-                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, r.url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                openOutside(ctx, r.url)                       // (not https: mailto:, intents, ...)
                 return true
             }
 
@@ -148,15 +179,87 @@ class ManagerBridge(private val model: AppModel, private val port: String, priva
                 trusted = ManagerList.trusted(u)
             }
         }
-        w.setDownloadListener { u, _, _, _, _ ->
-            // (an editor's download with a real address: the browser saves it; blob: downloads are not supported yet)
-            if (u.startsWith("https:")) runCatching {
-                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        w.webChromeClient = Chrome(ctx)
+        w.setDownloadListener { u, _, disposition, mime, _ ->
+            val name = URLUtil.guessFileName(u, disposition, mime).ifEmpty { "download" }
+            when {
+                u.startsWith("blob:") || u.startsWith("data:") ->   // (an editor's backup made in the page)
+                    w.evaluateJavascript(fetchScript(u, name), null)
+                u.startsWith("https:") -> openOutside(ctx, Uri.parse(u))
             }
         }
         trusted = ManagerList.trusted(url)
         w.loadUrl(url)
         return w
+    }
+
+    private fun openOutside(ctx: Context, u: Uri) {
+        runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, u).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+    }
+
+    /** the page's dialogs, file inputs, new windows and console */
+    private inner class Chrome(private val ctx: Context) : WebChromeClient() {
+        private fun dialog(): AlertDialog.Builder? = runCatching { AlertDialog.Builder(ctx) }.getOrNull()?.also { dialogs++ }
+
+        override fun onJsAlert(view: WebView, url: String?, message: String?, result: JsResult): Boolean {
+            val b = dialog() ?: return false
+            b.setMessage(message).setPositiveButton("OK") { _, _ -> result.confirm() }
+                .setOnCancelListener { result.confirm() }.show().also { lastDialog = it }
+            return true
+        }
+
+        override fun onJsConfirm(view: WebView, url: String?, message: String?, result: JsResult): Boolean {
+            val b = dialog() ?: return false
+            b.setMessage(message).setPositiveButton("OK") { _, _ -> result.confirm() }
+                .setNegativeButton("Cancel") { _, _ -> result.cancel() }
+                .setOnCancelListener { result.cancel() }.show().also { lastDialog = it }
+            return true
+        }
+
+        override fun onJsPrompt(view: WebView, url: String?, message: String?, defaultValue: String?, result: JsPromptResult): Boolean {
+            val b = dialog() ?: return false
+            val field = EditText(ctx).apply { setText(defaultValue ?: ""); setSingleLine() }
+            b.setMessage(message).setView(field)
+                .setPositiveButton("OK") { _, _ -> result.confirm(field.text.toString()) }
+                .setNegativeButton("Cancel") { _, _ -> result.cancel() }
+                .setOnCancelListener { result.cancel() }.show().also { lastDialog = it }
+            return true
+        }
+
+        // (a page's file input: the app's picker, in the folder last picked from, any file)
+        override fun onShowFileChooser(view: WebView, callback: ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean {
+            val p = picker ?: return false
+            choosing?.onReceiveValue(null)
+            choosing = callback
+            p(params.mode == FileChooserParams.MODE_OPEN_MULTIPLE) { uris ->
+                val c = choosing ?: return@p
+                choosing = null
+                if (uris.isNotEmpty()) PickerFolder.of(ctx, PickerFolder.EDITOR).remember(uris)
+                c.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray())
+            }
+            return true
+        }
+
+        // (a link to a new window: the browser. The new window's first load says where it goes)
+        override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean {
+            val probe = WebView(ctx)
+            probe.webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
+                    openOutside(ctx, r.url)
+                    v.destroy()
+                    return true
+                }
+            }
+            (resultMsg.obj as? WebView.WebViewTransport)?.webView = probe
+            resultMsg.sendToTarget()
+            return true
+        }
+
+        override fun onConsoleMessage(m: ConsoleMessage): Boolean {
+            if (m.messageLevel() == ConsoleMessage.MessageLevel.ERROR || m.messageLevel() == ConsoleMessage.MessageLevel.WARNING)
+                Log.w(TAG, "page ${m.messageLevel().name.lowercase()}: ${m.message().take(600)} (${m.sourceId()}:${m.lineNumber()})")
+            return true
+        }
     }
 
     /** tests: a script's result on the page (the main thread) */
@@ -190,7 +293,19 @@ class ManagerBridge(private val model: AppModel, private val port: String, priva
         }
     }
 
-    /** the page's side: as small as it can be, and only for remotefm1.com */
+    /** a download the page made (base64): written to the cache's share/ and offered to the share sheet */
+    private fun saved(name: String, b64: String) {
+        val bytes = runCatching { Base64.decode(b64, Base64.DEFAULT) }.getOrNull() ?: return
+        if (bytes.size > MAX_DOWNLOAD) return
+        val safe = name.replace(Regex("[/\\\\:]"), "_").ifEmpty { "download" }
+        val dir = File(cacheDir ?: return, "share").apply { mkdirs() }
+        val f = File(dir, safe)
+        runCatching { f.writeBytes(bytes) }.onFailure { Log.w(TAG, "download: $it"); return }
+        lastDownload = safe
+        share?.invoke(f, "application/octet-stream")
+    }
+
+    /** the page's side: as small as it can be, and only for https pages */
     private inner class Js {
         @JavascriptInterface
         fun postMessage(json: String) {
@@ -210,23 +325,43 @@ class ManagerBridge(private val model: AppModel, private val port: String, priva
         fun hello() {
             if (trusted) midiAsked = true
         }
+
+        @JavascriptInterface
+        fun download(name: String, b64: String) {
+            if (!trusted) return
+            main.post { saved(name, b64) }
+        }
     }
 
     companion object {
         const val TAG = "RFMManager"
+        const val MAX_DOWNLOAD = 64 shl 20
         /** tests: the bridge on screen now */
         @Volatile var current: ManagerBridge? = null
             private set
+        /** (MainActivity) the document picker for a page's file input: multiple, then the picked files (none: cancelled) */
+        var picker: ((multiple: Boolean, done: (List<Uri>) -> Unit) -> Unit)? = null
+        /** (MainActivity) the share sheet for a file the page saved */
+        var share: ((File, String) -> Unit)? = null
 
-        /** a whole Web MIDI for the page (iOS's ManagerWebView.webMIDI, after RemoteFM1's web/managers/fm1-shim.js,
-         *  which the site's hosted pages load: set as window.__fm1shim first so that one stands aside): one input and
-         *  one output named as the firmware's USB port, always connected, sysex granted; what the page sends goes to
-         *  the app (fm1mgr), the app's __fm1player.midi(list) comes in on the input. (Android: the post goes through
-         *  window.fm1mgr as JSON; requestMIDIAccess also says hello) */
+        /** the page fetches its own blob:/data: download and hands it over as base64 */
+        fun fetchScript(url: String, name: String): String {
+            val u = JSONObject.quote(url)
+            val n = JSONObject.quote(name)
+            return """(function(){fetch($u).then(r=>r.blob()).then(b=>{const f=new FileReader();""" +
+                """f.onload=()=>{const s=String(f.result);window.fm1mgr.download($n,s.slice(s.indexOf(',')+1));};""" +
+                """f.readAsDataURL(b);}).catch(e=>console.error('download: '+e));})();"""
+        }
+
+        /** a whole Web MIDI for the page (iOS's ManagerWebView.webMIDI, after RemoteFM1's web/managers/fm1-shim.js:
+         *  set as window.__fm1shim first so that one stands aside): one input and one output named as the firmware's
+         *  USB port, always connected, sysex granted; what the page sends goes to the app (fm1mgr), the app's
+         *  __fm1player.midi(list) comes in on the input. Any editor page works. (Android: the post goes through
+         *  window.fm1mgr as JSON; requestMIDIAccess also says hello; file inputs need no help: onShowFileChooser) */
         val WEB_MIDI = """
 (function (G) {
   "use strict";
-  if (G.__fm1app) return;
+  if (G.__fm1app || !G.fm1mgr) return;
   const state = %STATE%, NAME = state.port || "FM-1";
   const post = (bytes) => { try { G.fm1mgr.postMessage(JSON.stringify(Array.from(bytes))); } catch (_) {} };
   const msgEvent = (data) => { try { return new MessageEvent("midimessage", { data }); } catch (_) {
@@ -273,6 +408,17 @@ class ManagerBridge(private val model: AppModel, private val port: String, priva
     const q = G.navigator.permissions.query.bind(G.navigator.permissions);
     G.navigator.permissions.query = (d) => (d && d.name === "midi") ? Promise.resolve({ state: "granted", onchange: null }) : q(d);
   }
+  // (a download the page makes, <a download> with a blob: or data: link: fetched here and handed to the app with its
+  // name, for the share sheet; Android's download listener knows no name for a blob)
+  const save = (a) => { const name = a.download || "download";
+    fetch(a.href).then((r) => r.blob()).then((b) => { const f = new FileReader();
+      f.onload = () => { const s = String(f.result); G.fm1mgr.download(name, s.slice(s.indexOf(",") + 1)); }; f.readAsDataURL(b); })
+      .catch((e) => console.error("download: " + e)); };
+  const isSave = (a) => a && a.hasAttribute && a.hasAttribute("download") && /^(blob|data):/.test(a.href || "");
+  const aClick = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function () { if (isSave(this)) { save(this); return; } return aClick.apply(this, arguments); };
+  G.addEventListener("click", (e) => { const a = e.target && e.target.closest ? e.target.closest("a") : null;
+    if (isSave(a)) { e.preventDefault(); e.stopPropagation(); save(a); } }, true);
   G.__fm1player = { midi(list) { if (input._conn !== "open") return; for (const b of list) input.dispatchEvent(msgEvent(Uint8Array.from(b))); } };
   G.__fm1app = true;
   G.__fm1shim = { app: true, manager: state.firmware, framed: false };
@@ -281,15 +427,18 @@ class ManagerBridge(private val model: AppModel, private val port: String, priva
     }
 }
 
-/** the manager for the running firmware, or null (the Firmware page offers it only when there is one) */
+/** the editor (or, [reader], the screen reader) for the running firmware, or nothing (the Firmware page offers it
+ *  only when there is one) */
 @Composable
-fun ManagerFor(model: AppModel, done: () -> Unit) {
+fun ManagerFor(model: AppModel, reader: Boolean = false, done: () -> Unit) {
     val c = model.current
-    val url = c?.let { ManagerList.url(it.firmwareID) }
+    val details = model.fw.store.details
+    val url = c?.let { if (reader) ManagerList.READER else ManagerList.editor(it.firmwareID, details) }
     if (c == null || url == null) {
         androidx.compose.runtime.LaunchedEffect(Unit) { done() }
         return
     }
     Log.i(ManagerBridge.TAG, "opening $url for ${c.name}")
-    ManagerPage(model, url, ManagerList.port(c.firmwareID, c.name), c.name, done)
+    ManagerPage(model, url, ManagerList.port(c.firmwareID, c.name, details), c.name,
+                title = if (reader) "Screen reader" else null, done = done)
 }

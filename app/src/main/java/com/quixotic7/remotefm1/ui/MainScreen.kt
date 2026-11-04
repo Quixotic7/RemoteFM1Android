@@ -10,7 +10,9 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,6 +34,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.material3.Text
@@ -43,11 +50,17 @@ import com.quixotic7.remotefm1.ui.sheet.ThemeEditor
 @Composable
 fun MainScreen(a: AppUi, askNotifications: () -> Unit) {
     val ui = a.ui
+    androidx.compose.runtime.SideEffect { Recompositions.main++ }
     LaunchedEffect(a) {
         snapshotFlow { Triple(ui.page, ui.deck, ui.knobSet) }.collect { a.saveView() }
     }
     LaunchedEffect(a) {
         snapshotFlow { a.current?.name }.collect { ui.firmwareName = it }
+    }
+    // (G, iOS dc771c8) RemoteFM1 running in the app is a cartridge target while it runs
+    LaunchedEffect(a) {
+        snapshotFlow { a.current?.firmwareId == com.quixotic7.remotefm1.cart.CoreCartTransport.FIRMWARE_ID && a.model.mode == com.quixotic7.remotefm1.Mode.CORE }
+            .collect { com.quixotic7.remotefm1.cart.CoreCartTransport.running = it }
     }
     // (A6) MIDI learn ends when the sheet or the theme editor opens (iOS: the host stops it when its sheet opens)
     LaunchedEffect(a) {
@@ -78,25 +91,34 @@ fun MainScreen(a: AppUi, askNotifications: () -> Unit) {
                 InstallPromptCard(p, install = { a.openSheet(SheetPageId.INSTALL) }, notNow = { a.appFm1.prompter.notNow() })
             }
         }
+        // (G, iOS 391497e + dc771c8) a swipe in from the right edge: the running firmware's editor (RemoteFM1's: its
+        // cartridge page)
+        if (!ui.sheetOpen && !ui.editorOpen && !ui.displayAlone && a.overlay == null) EditorEdgeSwipe(a)
+        // (F, iOS 836a983) the firmware sidebar: a swipe in from the left edge
+        if (!ui.sheetOpen && !ui.editorOpen && !ui.displayAlone && !a.feed.learn.active && a.overlay == null) FirmwareSidebar(a)
         PullDownSheet(ui.sheetOpen, { a.closeSheet() }) { SheetContent(a) }
+        UpdateNoticeHost(a)                         // (F, iOS a67b1cf) the launch notice
         InstallProgressCover(a.appFm1.installer)
         AnimatedVisibility(ui.editorOpen, enter = slideInVertically(tween(300)) { it }, exit = slideOutVertically(tween(300)) { it }) {
             ThemeEditor(a.themes, a.feed) { ui.editorOpen = false }
         }
         // (A6) the toast and MIDI learn's bar, over everything but the full-screen pages
         FaceplateOverlay(a.feed, barAtTop = ui.page == FaceplateUi.Page.CONTROLS)
-        AnimatedVisibility(a.overlay != null, enter = fadeIn(tween(200)), exit = fadeOut(tween(200))) {
-            if (a.overlay == Overlay.MANAGER) {
-                ManagerFor(a.model) { a.overlay = null }
-                return@AnimatedVisibility
-            }
+        // (G, iOS eb3455c) the web editor slides in from the right as a layer, and out on Done or the back gesture
+        val editorShown = a.overlay == Overlay.MANAGER || a.overlay == Overlay.READER
+        var lastEditor by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(Overlay.MANAGER) }
+        if (editorShown) lastEditor = a.overlay!!
+        AnimatedVisibility(editorShown, enter = slideInHorizontally(tween(280)) { it }, exit = slideOutHorizontally(tween(280)) { it }) {
+            ManagerFor(a.model, reader = lastEditor == Overlay.READER) { a.overlay = null }
+        }
+        AnimatedVisibility(a.overlay != null && !editorShown, enter = fadeIn(tween(200)), exit = fadeOut(tween(200))) {
             val pages = Pages(a.model, done = { a.overlay = null }, bluetooth = { a.overlay = Overlay.BLUETOOTH },
                               askNotifications = askNotifications)
             OverlayPage {
                 when (a.overlay) {
                     Overlay.DIAGNOSTICS -> pages.DiagnosticsPage()
                     Overlay.BLUETOOTH -> pages.BluetoothPage()
-                    Overlay.MANAGER, null -> {}
+                    Overlay.MANAGER, Overlay.READER, null -> {}
                 }
             }
         }
@@ -121,4 +143,32 @@ fun WipedMemoryCard(copy: com.quixotic7.remotefm1.data.FlashHistory.Snapshot, fi
             com.quixotic7.remotefm1.ui.sheet.SheetButton("Keep the new one", tag = "wiped-keep") { answer(false) }
         }
     }
+}
+
+/** (G, iOS RightEdgeSwipe) a thin strip on the right edge: a swipe in from it (to the left) opens the running firmware's
+ *  editor, or RemoteFM1's cartridge page. Not over the status row (its firmware name) */
+@Composable
+private fun EditorEdgeSwipe(a: AppUi) {
+    val c = a.current ?: return
+    val hasEditor = com.quixotic7.remotefm1.managers.ManagerList.editor(c.firmwareId, a.model.fw.store.details) != null
+    val isRemote = c.firmwareId == com.quixotic7.remotefm1.cart.CoreCartTransport.FIRMWARE_ID
+    if (!hasEditor && !isRemote) return
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterEnd) {
+        Box(Modifier.padding(top = 90.dp).width(14.dp).fillMaxHeight().testTag("editor-edge")
+            .pointerInput(hasEditor) {
+                var dx = 0f
+                detectHorizontalDragGestures(onDragStart = { dx = 0f }, onDragEnd = {
+                    if (dx < -60.dp.toPx()) {
+                        if (hasEditor) a.overlay = Overlay.MANAGER
+                        else { a.cartBackTitle = "Firmware"; a.openSheet(SheetPageId.CART) }
+                    }
+                }) { ch, d -> ch.consume(); dx += d }
+            })
+    }
+}
+
+/** (G, iOS 391497e: 144 main-screen redraws in 12 s, then 5) recompositions counted, for the tests */
+object Recompositions {
+    @Volatile var main = 0
+    @Volatile var firmwarePage = 0
 }

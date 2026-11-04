@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // Ported from RemoteFM1IOS edf2039 RFMKit/Tests/RFMKitTests/FirmwareStoreTests.swift (testVersionOrder,
-// testFileNames, testSiteCatalog, testGitHubRelease, testMerge, testInstallState): version order, the two feeds read
+// testFileNames, testSiteCatalog, testGitHubRelease, testMerge, testInstallState; d629aa0's rebuild state and
+// FirmwareListingTests.testCatalogEditorAndPort's feed half): version order, the two feeds read
 // from saved copies of their answers (resources/firmware: iOS's fixtures, trimmed), the merge, the install state.
 package com.quixotic7.remotefm1.firmware
 
@@ -116,7 +117,9 @@ class FirmwareFeedsTest {
         val e = entry("felucca", "1.6.2", "new", 1, listOf("https://x/f.rfm1"))
         assertEquals(InstallState.NotInstalled, e.state(emptyList()))
         assertEquals(InstallState.Update("1.6.1"), e.state(listOf(file("felucca", "1.6.1"))))
-        assertEquals(InstallState.Installed("1.6.2"), e.state(listOf(file("felucca", "1.6.1"), file("felucca", "1.6.2"))))
+        // (iOS d88353e) the same version, another file: a rebuild, offered as an update
+        assertEquals(InstallState.Update("1.6.2"), e.state(listOf(file("felucca", "1.6.1"), file("felucca", "1.6.2"))))
+        assertEquals(InstallState.Installed("1.6.2"), e.state(listOf(file("felucca", "1.6.2", sha = "new"))))
         assertEquals(InstallState.Installed("1.7"), e.state(listOf(file("felucca", "1.7"))))            // (a newer one by hand)
         assertEquals(InstallState.Installed("0.1"), e.state(listOf(file("other", "0.1", sha = "new")))) // (the same file)
         assertEquals(InstallState.NotInstalled, e.state(listOf(file("felucca", "1.6.1").copy(error = "bad"))))
@@ -137,5 +140,45 @@ class FirmwareFeedsTest {
         val s = FeedSnapshot.fromMap(MiniJson.parse(old).obj())!!
         assertEquals("", s.firmware[0].editor)
         assertEquals(5L, s.firmware[0].size)
+    }
+
+    /** (iOS f02182b, FirmwareListingTests.testCatalogEditorAndPort) RemoteFM1FW's catalog may give a firmware's editor
+     *  and its USB MIDI port name; they win over the site's (https only) */
+    @Test fun catalogEditorAndPort() {
+        val site = """{"firmwares":[{"id":"mutabledreams","name":"Mutable Dreams"},{"id":"felucca","name":"Felucca","editor":"https://hugelton.github.io/Felucca/webapp/editor/"}]}""".toByteArray()
+        val cat = """{"schema":1,"firmwares":{"mutabledreams":{"editor":"https://mutable-dreams.kidbee85.chatgpt.site/#device-editor","port":"Mutable Dreams FM-1"},"rainbow":{"editor":"http://insecure.example/"}}}""".toByteArray()
+        val d = FeedSnapshot.details(listOf(FeedSnapshot.parse(site, FirmwareFeed.REMOTEFM1), FeedSnapshot.parse(cat, FirmwareFeed.FW_CATALOG)))
+        assertEquals("https://mutable-dreams.kidbee85.chatgpt.site/#device-editor", d["mutabledreams"]?.editor)
+        assertEquals("Mutable Dreams FM-1", d["mutabledreams"]?.port)
+        assertEquals("the site's, when the catalog has none", "https://hugelton.github.io/Felucca/webapp/editor/", d["felucca"]?.editor)
+        assertEquals("https only", "", d["rainbow"]?.editor ?: "")
+        assertEquals("", d["felucca"]?.port)
+    }
+
+    /** (iOS fe93170 / e91d519) RemoteFM1FW's catalog: card text by id, its image relative to the catalog, https only;
+     *  its text and image win over remotefm1.com's; a bad item is left out */
+    @Test fun fwCatalog() {
+        val c = FeedSnapshot.parse(FakeRfm1.fixture("fwcatalog-2026-11-01.json").readBytes(), FirmwareFeed.FW_CATALOG)
+        assertEquals(setOf("amb", "grimm", "zen1"), c.details.keys)
+        assertTrue(c.firmware.isEmpty())
+        val img = "https://raw.githubusercontent.com/Quixotic7/RemoteFM1FW/main/catalog/images/"
+        assertEquals(img + "grimm.png", c.details["grimm"]?.image)
+        assertEquals("Grim drums", c.details["grimm"]?.summary)
+        assertTrue(c.details["grimm"]!!.beta)
+        assertEquals("", c.details["zen1"]?.image)
+        val site = FeedSnapshot.parse(FakeRfm1.catalogJSON, FirmwareFeed.REMOTEFM1)
+        val rel = FeedSnapshot.parse(FakeRfm1.releaseJSON, FirmwareFeed.RELEASES)
+        assertEquals("2026-10-29", rel.release)
+        val d = FeedSnapshot.details(listOf(site, rel, c))
+        assertEquals("Catalog text for amb.", d["amb"]?.about)
+        assertEquals("AMB-1", d["amb"]?.name)                     // (the site's name kept)
+        val amb = FeedSnapshot.merge(listOf(site, rel, c)).first { it.id == "amb" }
+        assertEquals(img + "amb.png", amb.image)
+        assertEquals("Generative ambient", amb.summary)
+        assertFalse(amb.downloads.isEmpty())
+        // the cache keeps the new fields (iOS's names)
+        val back = FeedSnapshot.fromMap(MiniJson.parse(MiniJson.write(c.toMap())).obj())
+        assertEquals(c, back)
+        assertEquals(rel, FeedSnapshot.fromMap(MiniJson.parse(MiniJson.write(rel.toMap())).obj()))
     }
 }

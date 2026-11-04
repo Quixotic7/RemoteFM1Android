@@ -38,6 +38,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -106,10 +107,11 @@ fun SheetContent(a: AppUi) {
                 SheetPageId.MIDI_INPUT -> MidiInputPage(a)
                 SheetPageId.KEY_CHANNEL -> KeyChannelPage(a)
                 SheetPageId.MIDI_MODE -> MidiModePage(a)
+                SheetPageId.TRANSFER -> TransferPage(a)
                 SheetPageId.SETTINGS -> SettingsPage(a)
                 SheetPageId.INSTALL -> a.fm1.installPage?.invoke { a.page = SheetPageId.SETTINGS }
                     ?: LaterPage("Install RemoteFM1", "Settings", "Installing RemoteFM1 on the FM-1 comes with milestone A7.") { a.page = SheetPageId.SETTINGS }
-                SheetPageId.CART -> a.fm1.cartPage?.invoke { a.page = SheetPageId.SETTINGS }
+                SheetPageId.CART -> a.fm1.cartPage?.invoke { a.page = if (a.cartBackTitle == "Firmware") SheetPageId.FIRMWARE else SheetPageId.SETTINGS }
                     ?: LaterPage("Send a DX7 cartridge", "Settings", "Sending cartridges comes with milestone A7.") { a.page = SheetPageId.SETTINGS }
             }
         }
@@ -133,17 +135,26 @@ private fun MainSheet(a: AppUi) {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(bottom = 8.dp)) {
             SheetSectionTitle(a.current?.let { "${it.name} ${it.version}" } ?: "Firmware", top = 18)
             DataRows(a, from = null)
-            SheetSectionTitle("Sound source")
+            // (F, iOS 836a983: was "Sound source", read as where the sound comes out. This picks where the firmware
+            // runs; where the sound comes out is Audio output, right under it)
+            SheetSectionTitle("Firmware runs on")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SourceCard("This ${a.deviceWord}", "Emulator, play by touch", m.source == Source.TABLET, Palette.sheetAccent,
                            "source-tablet") { a.pick(Source.TABLET) }
-                SourceCard("FM-1", fm1Line(a), m.source == Source.FM1,
+                SourceCard("My FM-1", fm1Line(a), m.source == Source.FM1,
                            if (a.chip == PanelChip.IN_USE) Palette.sheetAccent else Palette.linkedDot, "source-fm1") { a.pick(Source.FM1) }
             }
             // (the FM-1 card's actions: the Bluetooth pairing, as on iOS)
             if (m.source == Source.FM1) {
                 Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SheetButton("Bluetooth…", tag = "button-bluetooth") { a.overlay = Overlay.BLUETOOTH }
+                }
+                SheetNote("The FM-1 plays through its own speaker and headphone jack; this ${a.deviceWord} is its remote.")
+            } else {
+                SheetList(Modifier.padding(top = 10.dp)) {
+                    SheetRow("Audio output", value = AudioRoute.kindTitle(m.pickable, m.outputPick), divider = false, tag = "row-output-main") {
+                        a.page = SheetPageId.AUDIO_OUTPUT
+                    }
                 }
             }
             SheetSectionTitle("View · or swipe sideways")
@@ -169,9 +180,9 @@ private fun fm1Line(a: AppUi): String {
     val m = a.model
     return when (val s = m.state) {
         is LinkState.InUse -> "In use by another app"
-        is LinkState.Connected -> "RemoteFM1 · ${if (s.bluetooth) "Bluetooth" else "USB"}${if (m.backend.isFake) " (fake)" else ""}"
+        is LinkState.Connected -> "Remote control · ${if (s.bluetooth) "Bluetooth" else "USB"}${if (m.backend.isFake) " (fake)" else ""}"
         LinkState.NotFound -> "Not found · plug in or pair over Bluetooth"
-        else -> "RemoteFM1 · USB or Bluetooth"
+        else -> "Remote control · USB or Bluetooth"
     }
 }
 
@@ -207,15 +218,27 @@ private fun FirmwarePage(a: AppUi) {
     val imported = all.filter { it.imported }
     val c = a.current
     SheetPage(c?.name ?: "Firmware", back = { a.page = null }) {
+        androidx.compose.runtime.SideEffect { Recompositions.firmwarePage++ }
         if (c != null) {
             FirmwareInfoCard(a, c)
             SheetNote("${c.version}${if (c.imported) " · imported" else " · built in"}${if (a.running) " · running" else ""}")
+            PerfNote(a)                                         // (E: PerfGuard, a firmware too heavy here)
+            AudioInputSection(a, c)                             // (E: ain1, iOS c47ac4f)
         }
         SheetSectionTitle("This firmware", top = 12)
         SheetList {
-            // (A6) the firmware's own web editor, when the site hosts one for it
-            if (c != null && com.quixotic7.remotefm1.managers.ManagerList.url(c.firmwareId) != null) {
+            // (G, iOS f47cdd4 + dc771c8) the firmware's own web editor (the catalog's link, else the author's page the
+            // app knows); RemoteFM1's is its cartridge page; the screen reader for the firmwares that speak to it
+            val details = m.fw.store.details
+            if (c != null && com.quixotic7.remotefm1.managers.ManagerList.editor(c.firmwareId, details) != null) {
                 SheetRow("Open its editor", value = "presets, backups", tag = "row-editor") { a.overlay = Overlay.MANAGER }
+            } else if (c?.firmwareId == com.quixotic7.remotefm1.cart.CoreCartTransport.FIRMWARE_ID) {
+                SheetRow("Open its editor", value = "DX7 cartridges", tag = "row-editor") {
+                    a.cartBackTitle = "Firmware"; a.page = SheetPageId.CART
+                }
+            }
+            if (c != null && com.quixotic7.remotefm1.managers.ManagerList.hasReader(c.firmwareId)) {
+                SheetRow("Screen reader", value = "reads the screen out", tag = "row-reader") { a.overlay = Overlay.READER }
             }
             SheetRow("About this firmware", enabled = c != null, tag = "row-about") { a.page = SheetPageId.ABOUT }
             SheetRow("Restart the firmware", divider = false, chevron = false, tag = "row-restart") { m.restartFirmware() }
@@ -223,16 +246,24 @@ private fun FirmwarePage(a: AppUi) {
         Box(Modifier.padding(top = 12.dp)) { Column { DataRows(a, from = SheetPageId.FIRMWARE) } }
         // (a Fantasy CFW that reads files) its RemoteFM1 folder
         c?.let { a.firmware.fantasy(it) }?.takeIf { it.virtual && it.usesFolder }?.let { FantasyFolderSection(a, it) }
-        SheetSectionTitle("Built in")
+        // (F, iOS 836a983) the lists sorted; the big Get more firmware button under the built-ins
+        a.model.fw.store.allVersions.collectAsState().value.size
+        SheetSectionTitle("Sort")
+        ChipPicker(com.quixotic7.remotefm1.firmware.FirmwareListing.Sort.entries.map { it to it.title }, a.listPrefs.sort, "sort") {
+            a.listPrefs.sort(it)
+        }
+        SheetSectionTitle("Built in", top = 14)
         FirmwareTileGrid(a, builtIn)
+        Box(Modifier.padding(top = 14.dp)) {
+            GetMoreButton(toDownload(a), a.firmware.updates) { a.page = SheetPageId.GET_FIRMWARE }
+        }
         SheetSectionTitle("Imported")
         if (imported.isNotEmpty()) {
             FirmwareTileGrid(a, imported)
             Spacer(Modifier.height(10.dp))
         }
         SheetList {
-            SheetRow("Get firmware", badge = a.firmware.updates, tag = "row-getfirmware") { a.page = SheetPageId.GET_FIRMWARE }
-            SheetRow("Add firmware…", divider = false, enabled = a.firmware.addFirmware != null, tag = "row-addfirmware") {
+            SheetRow("Add firmware file…", divider = false, enabled = a.firmware.addFirmware != null, tag = "row-addfirmware") {
                 a.firmware.addFirmware?.invoke()
             }
         }
@@ -394,8 +425,16 @@ private fun StatesList(a: AppUi, firmware: String, states: List<StateItem>) {
             val div = i < states.size - 1
             Box(Modifier.divider(div)) {
                 when {
-                    ask == "load:${s.id}" -> SheetAsk(s.loadQuestion.ifEmpty { "Load \"${s.name}\"? A safety copy of the current memory is kept first." },
-                                                     if (s.note.isEmpty()) "Load" else "Load anyway", { ask = null }) { ask = null; d.loadState(s) }
+                    ask == "load:${s.id}" -> Column {
+                        SheetAsk(s.loadQuestion.ifEmpty { "Load \"${s.name}\"? A safety copy of the current memory is kept first." },
+                                 s.loadAction.ifEmpty { if (s.note.isEmpty()) "Load" else "Load anyway" }, { ask = null }) { ask = null; d.loadState(s) }
+                        // (F, iOS 9494ebe) a newer version's state: its own version, here or from GitHub
+                        s.otherVersion?.let { t ->
+                            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 10.dp), horizontalArrangement = Arrangement.End) {
+                                SheetButton(t, accent = true, tag = "load-other") { ask = null; d.loadOtherVersion(s) }
+                            }
+                        }
+                    }
                     ask == "delete:${s.id}" -> SheetAsk("Delete \"${s.name}\" from the library?", "Delete", { ask = null }) {
                         ask = null; editing = null; d.deleteState(s)
                     }
@@ -503,13 +542,7 @@ private fun MidiAudioPage(a: AppUi) {
                 a.page = SheetPageId.AUDIO_OUTPUT
             }
         }
-        AudioRoute.hint(m.outputList, m.playingOn)?.let { SheetNote(it) }
-        val st = m.audioState
-        SheetNote(if (m.mode == Mode.CORE && m.soundOn) st.line + m.engineStatus.let { s ->
-            val rate = s.optDouble("rate")
-            if (rate > 0) "; %.1f ms ahead, %d underruns".format(s.optInt("latency_frames") * 1000.0 / rate, s.optInt("underruns")) else ""
-        } else "No sound: the firmware runs on a timer.",
-                  if (st is AudioState.Failed || st is AudioState.Busy) Palette.orange else Palette.sheetMuted)
+        LiveAudioLines(m)
         SheetList(Modifier.padding(top = 12.dp)) {
             SheetToggle("Sound through USB devices (experimental)", m.usbAudio, divider = false, tag = "toggle-usbaudio") { m.useUsbAudio(it) }
         }
@@ -580,7 +613,7 @@ private fun AudioOutputPage(a: AppUi) {
                          tag = "output-$k") { m.chooseOutput(k) }
             }
         }
-        if (m.soundOn) SheetNote("Playing on ${AudioRoute.name(m.outputList, m.playingOn)}.")
+        if (m.soundOn) Live { SheetNote("Playing on ${AudioRoute.name(m.outputList, m.playingOn)}.") }
         if (m.usbAudio && m.outputList.any { it.usb }) SheetNote(AudioRoute.USB_WARNING, Palette.orange)
     }
 }
@@ -591,7 +624,8 @@ private fun AudioOutputPage(a: AppUi) {
 private fun SettingsPage(a: AppUi) {
     val d = a.data
     SheetPage("Settings", back = { a.page = null }) {
-        SheetSectionTitle("Keys", top = 12)
+        BackgroundSection(a)
+        SheetSectionTitle("Keys")
         SheetList {
             SheetToggle("Step numbers on the keys", a.ui.stepNumbers, divider = false, tag = "toggle-steps") { a.useStepNumbers(it) }
         }
@@ -605,7 +639,7 @@ private fun SettingsPage(a: AppUi) {
         SheetList {
             SheetRow("Install RemoteFM1 on the FM-1", value = a.fm1.installBadge, tag = "row-install") { a.page = SheetPageId.INSTALL }
             SheetRow("Send a DX7 cartridge", value = if (a.fm1.cartBusy) "sending…" else null, divider = false, tag = "row-cart") {
-                a.page = SheetPageId.CART
+                a.cartBackTitle = "Settings"; a.page = SheetPageId.CART
             }
         }
         SheetNote("A DX7 cartridge (.syx) becomes a user bank on RemoteFM1 0.3.0 or later.")
@@ -614,11 +648,49 @@ private fun SettingsPage(a: AppUi) {
             SheetRow(if (d.backingUp) "Backing up…" else "Back up everything", chevron = false) { if (!d.backingUp) d.backUp() }
             d.shareBackup?.let { SheetRow("Share the backup…", chevron = false, action = it) }
             SheetRow("Restore from backup…", chevron = false, enabled = d.restoreBackup != null) { d.restoreBackup?.invoke() }
+            // (F, iOS 9494ebe) one .rfm1transfer for another phone, tablet, iPhone or iPad
+            d.sendTransfer?.let { SheetRow("Send to another device…", chevron = false, tag = "row-transfer", action = it) }
             SheetRow("Folder for backups…", divider = false, chevron = false, enabled = a.pickFolder != null) { a.pickFolder?.invoke() }
         }
         SheetNote(d.backupNote.ifEmpty {
             "Back up everything writes every state, each firmware's current memory and the newest safety copies into " +
                 "one backup. Restore adds a backup's states to the library; nothing is overwritten."
         })
+        if (d.sendTransfer != null) SheetNote("Send to another device makes one file with every state, each firmware's current " +
+            "memory and the firmware files they need. Send it or save it, then open it on the other device (Android, iPhone " +
+            "or iPad): everything is added there, and its current memory loads with one tap.")
     }
+}
+
+/** (G, RemoteFM1IOS dfbc827 + e527b74: the battery) what the app does when you leave it or lock the screen: one row a
+ *  choice, a check on the chosen */
+@Composable
+private fun BackgroundSection(a: AppUi) {
+    val b = a.model.battery
+    val now = b.policy
+    SheetSectionTitle("When you leave the app", top = 12)
+    SheetList {
+        for (mode in com.quixotic7.remotefm1.BackgroundMode.entries) {
+            SheetRow(mode.title, chevron = false, check = mode == now.mode, tag = "bg-${mode.raw}") { b.use(now.copy(mode = mode)) }
+        }
+        SheetToggle("Stop after 10 quiet minutes", now.idleStop, divider = false, tag = "toggle-idlestop") { b.use(now.copy(idleStop = it)) }
+    }
+    SheetNote(now.mode.detail + " Quiet: no key, knob, MIDI or sound. Pause in the notification stops it too; it saves " +
+              "first and plays again when you come back." + (if (b.lastStop.isEmpty()) "" else " Last stopped: ${b.lastStop}."))
+}
+
+/** (G, iOS 14c9b96: the status read only in small Live views) what reads the engine's status, polled every 66 ms, in
+ *  a scope of its own: only these lines recompose with it, not the page */
+@Composable
+private fun Live(content: @Composable () -> Unit) = content()
+
+@Composable
+private fun LiveAudioLines(m: com.quixotic7.remotefm1.AppModel) {
+    AudioRoute.hint(m.outputList, m.playingOn)?.let { SheetNote(it) }
+    val st = m.audioState
+    SheetNote(if (m.mode == Mode.CORE && m.soundOn) st.line + m.engineStatus.let { s ->
+        val rate = s.optDouble("rate")
+        if (rate > 0) "; %.1f ms ahead, %d underruns".format(s.optInt("latency_frames") * 1000.0 / rate, s.optInt("underruns")) else ""
+    } else "No sound: the firmware runs on a timer.",
+              if (st is AudioState.Failed || st is AudioState.Busy) Palette.orange else Palette.sheetMuted)
 }

@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
-// Ported from RemoteFM1IOS edf2039 RFMKit/Tests/RFMKitTests/ManagerTests.swift (the decoder, the manager list)
-// The web managers' pieces without a WebView: USB-MIDI packets put back into whole messages, the site's managers and
-// ports, and which pages may talk to the player. (A SysEx through the firmware and back, and the page itself: the
-// emulator's ManagerTest.)
+// Ported from RemoteFM1IOS d629aa0 RFMKit/Tests/RFMKitTests/ManagerTests.swift (the decoder, the editor list, the
+// editor page, an old cache entry)
+// The web editors' pieces without a WebView: USB-MIDI packets put back into whole messages, the authors' editors and
+// ports, the screen reader, and which pages may talk to the player. (A SysEx through the firmware and back, and the
+// page itself: the emulator's ManagerTest.)
 package com.quixotic7.remotefm1.managers
 
+import com.quixotic7.remotefm1.firmware.AvailableFirmware
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,20 +31,61 @@ class ManagerListTest {
     }
 
     @Test fun managerList() {
-        assertEquals("https://remotefm1.com/managers/choralroot/", ManagerList.url("choralroot"))
-        assertEquals("https://remotefm1.com/managers/choralroot/", ManagerList.url("purplemonkey"))
-        assertEquals("https://remotefm1.com/managers/ghoulbox/", ManagerList.url("ghoulbox"))
-        assertNull(ManagerList.url("fizz"))
+        assertEquals("https://quixotic7.github.io/ChoralRootFM1/webapp/installer/manager.html", ManagerList.url("choralroot"))
+        assertEquals("https://quixotic7.github.io/ChoralRootFM1/webapp/installer/manager.html", ManagerList.url("purplemonkey"))
+        assertEquals("https://hugelton.github.io/Felucca/webapp/editor/", ManagerList.url("felucca"))
+        assertFalse("never the site's copies", ManagerList.authors.values.any { java.net.URI(it).host == "remotefm1.com" })
+        assertEquals("https://quixotic7.github.io/FIZZ/manager/", ManagerList.url("fizz"))
+        assertNull(ManagerList.url("nonesuch"))
+        assertNotNull("the site lists it as \"mutable\"", ManagerList.url("mutabledreams"))
+        assertEquals("Felucca's editor looks for Felucca", "Felucca", ManagerList.port("rainbow", "Rainbow Mode"))
         assertEquals("Melodee FM-1", ManagerList.port("melodee", "Melodee"))
+        // (RemoteFM1FW 31b8751, checked against the firmwares' USB descriptors)
+        assertEquals("10.26's; JIANT's editor matches FM-1", "FM-1", ManagerList.port("jiant", "JIANT"))
+        assertEquals("Hortator", ManagerList.port("hortator", "Hortator"))
+        assertNull("its firmware answers no editor (RemoteFM1FW 5bcbb65)", ManagerList.url("hortator"))
+        assertTrue("CTL-1's catalog id", ManagerList.hasReader("ctl1"))
+        assertTrue(ManagerList.hasReader("amb"))
+        assertFalse("his, but no screen reader support (0.4)", ManagerList.hasReader("ripple"))
         assertEquals("Nonesuch", ManagerList.port("nonesuch", "Nonesuch"))
-        assertEquals(6, ManagerList.managers.size)
     }
 
-    @Test fun onlyTheSiteTalksToThePlayer() {
-        assertTrue(ManagerList.trusted("https://remotefm1.com/managers/choralroot/"))
-        assertFalse(ManagerList.trusted("http://remotefm1.com/managers/choralroot/"))
-        assertFalse(ManagerList.trusted("https://remotefm1.com.example.org/"))
-        assertFalse(ManagerList.trusted("https://evil.example/remotefm1.com"))
+    /** the page: the catalog's editor link (the author's, https only), else the author's page the app knows */
+    @Test fun editorPage() {
+        val sloop = AvailableFirmware("sloop", editor = "https://isod89.github.io/sloop-fm1/webapp/editor/")
+        val bad = AvailableFirmware("old", editor = "http://example.com/editor")
+        val felucca = AvailableFirmware("felucca", editor = "https://hugelton.github.io/Felucca/webapp/editor/")
+        val d = mapOf("sloop" to sloop, "old" to bad, "felucca" to felucca)
+        assertEquals(sloop.editor, ManagerList.editor("sloop", d))
+        assertEquals("https://hugelton.github.io/Felucca/webapp/editor/", ManagerList.editor("felucca", d))
+        assertNull("not https", ManagerList.editor("old", d))
+        assertEquals("not in the catalog", ManagerList.authors["choralroot"], ManagerList.editor("choralroot", d))
+        val moved = AvailableFirmware("melodee", editor = "https://keremimo.github.io/melodee-next/editor/")
+        assertEquals("the catalog's link wins: the author may move it", moved.editor,
+                     ManagerList.editor("melodee", mapOf("melodee" to moved)))
+        assertNull(ManagerList.editor("nonesuch", d))
+    }
+
+    /** RemoteFM1FW's catalog `port` wins over the app's list (f02182b) */
+    @Test fun catalogPortWins() {
+        val j = AvailableFirmware("jiant", port = "JIANT FM")
+        assertEquals("JIANT FM", ManagerList.port("jiant", "JIANT", mapOf("jiant" to j)))
+        assertEquals("an empty port: the list", "FM-1", ManagerList.port("jiant", "JIANT", mapOf("jiant" to AvailableFirmware("jiant"))))
+    }
+
+    /** an older cache without `editor` still reads */
+    @Test fun oldCacheEntryDecodes() {
+        val e = AvailableFirmware.fromMap(mapOf("id" to "amb", "name" to "AMB-1", "version" to "1.3", "downloads" to emptyList<Any>()))!!
+        assertEquals("AMB-1", e.name)
+        assertEquals("", e.editor)
+    }
+
+    @Test fun onlyHttpsPagesTalkToThePlayer() {
+        assertTrue(ManagerList.trusted("https://hugelton.github.io/Felucca/webapp/editor/"))
+        assertTrue(ManagerList.trusted(ManagerList.READER))
+        assertFalse(ManagerList.trusted("http://hugelton.github.io/Felucca/webapp/editor/"))
+        assertFalse(ManagerList.trusted("file:///sdcard/x.html"))
+        assertFalse(ManagerList.trusted("javascript:alert(1)"))
         assertFalse(ManagerList.trusted(null))
     }
 

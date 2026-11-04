@@ -55,7 +55,11 @@ interface FirmwarePagesModel {
 
 /** a named state (iOS SavedState as the list shows it) */
 data class StateItem(val id: String, val name: String, val date: Long, val version: String, val note: String = "",
-                     val loadQuestion: String = "")
+                     val loadQuestion: String = "",
+                     /** (F, iOS 3828820) "Load", or "Load anyway" for a newer version's state ("": by the note) */
+                     val loadAction: String = "",
+                     /** (F, iOS 9494ebe) a newer version's state: the way to its own version ("Get 0.29 and load") */
+                     val otherVersion: String? = null)
 
 /** a safety copy (iOS FlashHistory.Snapshot as the list shows it) */
 data class SafetyItem(val id: String, val date: Long, val reason: String, val version: String)
@@ -80,6 +84,10 @@ interface DataPagesModel {
     val shareBackup: (() -> Unit)?
     /** Restore from backup… (a folder or files), null: not yet */
     val restoreBackup: (() -> Unit)?
+    /** (F) the state loaded into its own version (otherVersion's button) */
+    fun loadOtherVersion(s: StateItem) {}
+    /** (F, iOS 9494ebe) Send to another device…: one .rfm1transfer to the share sheet; null: not here */
+    val sendTransfer: (() -> Unit)? get() = null
     /** "<Firmware> <date>": the Save as… field's first name */
     fun defaultName(firmware: String): String
     val message: String

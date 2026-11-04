@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // Ported from RemoteFM1IOS edf2039 RFMKit/Sources/RFMKit/StateLibrary.swift and StateFile.swift (the library's side:
-// allStates, importState, importFile).
+// allStates, importState, importFile); 3828820's newer/loadQuestion.
 //
 // Named states: <root>/<firmware id>/<uuid>.flash (the flash, LZFSE as on iOS; written by FlashFile: temp file,
 // fsync, read back and compared, renamed in) and <uuid>.json (SavedState, iOS's fields and JSON). Root files/States.
@@ -39,16 +39,24 @@ data class SavedState(
     fun versionNote(running: String): String =
         if (version.isEmpty() || running.isEmpty() || version == running) "" else "made with $version"
 
-    /** the question before a load: a state from another version of the firmware says so plainly */
+    /** made with a newer version than [running] (an older one may not read it); an older version's state loads into a
+     *  newer version plainly (RemoteFM1IOS 3828820: the lists show only the newest version) */
+    fun newer(running: String): Boolean =
+        version.isNotEmpty() && running.isNotEmpty() && com.quixotic7.remotefm1.firmware.FirmwareVersion.less(running, version)
+
+    /** the question before a load: a state from a newer version says so plainly */
     fun loadQuestion(running: String): String {
         val keep = "The current memory is kept as a safety copy first."
-        if (versionNote(running).isEmpty()) return "Load \"$name\"? $keep"
-        return "\"$name\" was made with version $version; this is $running. Another version may not read it, or " +
-            "may reset it. Load it anyway? $keep"
+        if (!newer(running)) {
+            return if (versionNote(running).isEmpty()) "Load \"$name\"? $keep"
+            else "Load \"$name\" (made with $version) into $running? $keep"
+        }
+        return "\"$name\" was made with version $version, newer than this $running. An older version may not read it, " +
+            "or may reset it. Load it anyway? $keep"
     }
 
-    /** the Load button's word: "Load", or "Load anyway" for another version's state */
-    fun loadAction(running: String): String = if (versionNote(running).isEmpty()) "Load" else "Load anyway"
+    /** the Load button's word: "Load", or "Load anyway" for a newer version's state */
+    fun loadAction(running: String): String = if (newer(running)) "Load anyway" else "Load"
 
     /** the kept transpose, clamped to -2..2 (null: keep the player's) */
     val keptTranspose: Int? get() = transpose?.coerceIn(-2, 2)

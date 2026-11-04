@@ -129,6 +129,9 @@ class FakeFM1(@Volatile var silent: Boolean = false, banks: List<UserBank> = emp
         }
     }
 
+    /** (tests) the slots now */
+    val slotsNow: Map<Int, UserBank> get() = synchronized(lock) { HashMap(slots) }
+
     val list: BankList
         get() = synchronized(lock) {
             val free = (0 until 16).firstOrNull { slots[it] == null }

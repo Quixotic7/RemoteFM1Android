@@ -138,6 +138,13 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         private set
     var engineStatus by mutableStateOf(JSONObject())
         private set
+    // (E: iOS 836a983 / 3828820 / 14c9b96) a Wasm core's headroom, screen rate and thread priority per firmware
+    private val perf = PerfGuard()
+    /** the running Wasm firmware can't keep up on this device ("" when it does) */
+    var perfNote by mutableStateOf("")
+        private set
+    /** (E: ain1, iOS c47ac4f) the firmware's audio input */
+    val audioIn by lazy { AudioInput(ctx, engine, prefs) }
     var message by mutableStateOf("")
         private set
     /** the output picked, as a kind (AudioRoute.AUTO, SPEAKER, HEADPHONES, BLUETOOTH, USB); USB is never saved */
@@ -176,6 +183,43 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     private val rgba = ByteArray(240 * 240 * 4)
     private var booted: String? = null
     var playingListener: ((Boolean, String) -> Unit)? = null
+
+    // ---- (G: the battery, RemoteFM1IOS dfbc827) stopped to save the battery in the background: the core kept, its
+    // clock and the sound off; and whether a core is booted, set only on change (the pages read this, not engineStatus)
+    var suspended by mutableStateOf(false)
+        private set
+    var coreRunning by mutableStateOf(false)
+        private set
+    val battery = Battery(prefs, object : Battery.Host {
+        override val coreMode get() = mode == Mode.CORE
+        override val fm1Linked get() = state is LinkState.Connected
+        override val activity get() = Activity.of(engine.status())
+        override val suspended get() = this@AppModel.suspended
+        override fun setFrameMs(ms: Int) = engine.setFrameMs(ms)
+        override fun suspendForBattery(why: String) = this@AppModel.suspendForBattery(why)
+        override fun resumeFromBattery() = this@AppModel.resumeFromBattery()
+    })
+
+    /** the firmware saved, its clock and the sound stopped (the foreground service shows Play) */
+    fun suspendForBattery(why: String) {
+        if (suspended || mode != Mode.CORE) return
+        suspended = true
+        pushAudio()
+        engine.setClock(RfmEngine.CLOCK_NONE)
+        flash.saveStopped()
+        Log.i(TAG, "battery: stopped in the background ($why)")
+        playingChanged()
+    }
+
+    /** back from a battery stop: the clock and the sound as before */
+    fun resumeFromBattery() {
+        if (!suspended) return
+        suspended = false
+        if (mode == Mode.CORE && booted != null) engine.clockSwap(RfmEngine.CLOCK_NONE, RfmEngine.CLOCK_TIMER)
+        pushAudio()
+        Log.i(TAG, "battery: running again")
+        playingChanged()
+    }
 
     init {
         RfmEngine.scan(ctx.applicationInfo.nativeLibraryDir)
@@ -261,6 +305,8 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     fun select(id: String) {
         if (fw.core(id) == null) return
         selected = id
+        // (F, iOS 836a983) the lists' Recently used
+        fw.core(id)?.let { com.quixotic7.remotefm1.firmware.FirmwareListing.used(it, store = com.quixotic7.remotefm1.firmware.FirmwareListing.PrefsStore(prefs)) }
         saveSelection()
         if (id != booted) fallbackNote = ""
         if (mode == Mode.CORE) {
@@ -424,7 +470,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         val first = AudioRoute.choose(ok, pick)
         val auto = AudioRoute.choose(ok, AudioRoute.AUTO)
         val outs = listOfNotNull(first, auto?.takeIf { it.id != first?.id })
-        audio.want(AudioWant(mode == Mode.CORE && soundOn && booted != null, outs, list, audioRetry))
+        audio.want(AudioWant(mode == Mode.CORE && soundOn && booted != null && !suspended, outs, list, audioRetry))
     }
 
     private fun outputsChanged(list: List<AudioOut>) {
@@ -482,6 +528,25 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     }
 
     private fun nameOf(id: String) = fw.core(id)?.name ?: id
+
+    // ---- (E: ain1) the input on while the selected .rfm1 wants it, it is on for it, and the core plays with sound
+    /** the firmware [id]'s ain1 mode: 0 none (built-in cores), 1 wants, 2 needs */
+    fun audioInMode(id: String): Int = fw.core(id)?.takeIf { it.imported }?.let { audioIn.mode(it.path) } ?: 0
+
+    /** (the Firmware page) the setting changed: the input follows at once */
+    fun audioInChanged() = updateAudioIn()
+
+    private fun updateAudioIn() {
+        val c = fw.core(selected)
+        val fid = c?.firmwareID ?: ""
+        val on = c != null && mode == Mode.CORE && soundOn && booted == selected && !suspended &&
+            engineStatus.optInt("clock") == RfmEngine.CLOCK_AUDIO && audioInMode(selected) > 0 &&
+            audioIn.isOn(fid) && audioIn.granted
+        val rate = engineStatus.optDouble("rate", 0.0)
+        audioIn.want(AudioInput.Want(on, fid, audioIn.preferredPort(fid),
+            engineStatus.optJSONObject("audio")?.optDouble("latency_ms", 0.0) ?: 0.0,
+            if (rate > 0) engineStatus.optInt("latency_frames") * 1000.0 / rate else 0.0))
+    }
 
     /** the selection remembered as iOS's CoreRef (and the plain id for older builds) */
     private fun saveSelection() {
@@ -666,6 +731,9 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         val mv = if (p[2] < 0) null else p[2].toInt()
         if (mv != master) master = mv
         engineStatus = engine.status()
+        perf.apply(engine, engineStatus, nameOf(selected)).let { if (it != perfNote) perfNote = it }
+        updateAudioIn()
+        (mode == Mode.CORE && engineStatus.optInt("booted") != 0).let { if (it != coreRunning) coreRunning = it }
         if (mode == Mode.CORE && booted != null) {
             flash.refresh(engineStatus)?.let { message = it }
         }
@@ -705,6 +773,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         midi.willClose()
         soundOn = false
         pushAudio()                                             // (closed on the audio thread)
+        audioIn.want(AudioInput.Want(false))
         engine.setClock(RfmEngine.CLOCK_NONE)
         flash.saveStopped()
         flash.flush()

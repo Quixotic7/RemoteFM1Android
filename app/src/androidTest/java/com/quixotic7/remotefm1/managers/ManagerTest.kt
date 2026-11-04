@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // A6's "done when" for the web managers (the emulator, network on): ChoralRoot runs, Firmware › Open its editor shows
-// remotefm1.com's ChoralRoot manager in the WebView, the injected Web MIDI is asked for (the page's own shim stands
+// ChoralRoot's manager at its author's page (RemoteFM1IOS 95d5d16: never remotefm1.com's copy) in the WebView, the injected Web MIDI is asked for (the page's own shim stands
 // aside), the page's SysEx reaches the core, its replies come back, and the device manager says it is connected and
 // names the running firmware (as on iOS: the manager connected and read it). Its safety copy ("before manager write")
 // is kept.
@@ -9,6 +9,9 @@ package com.quixotic7.remotefm1.managers
 
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.quixotic7.remotefm1.AppModel
 import com.quixotic7.remotefm1.MainActivity
@@ -38,6 +41,17 @@ class ManagerTest {
             var r = false
             rule.runOnUiThread { r = ok() }
             if (r) return true
+            rule.mainClock.advanceTimeBy(100)
+            Thread.sleep(100)
+        }
+        return false
+    }
+
+    /** (not inside until: page() waits for the main thread) */
+    private fun pageUntil(ms: Long, js: String, want: String): Boolean {
+        val end = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < end) {
+            if (page(js)?.trim('"') == want) return true
             rule.mainClock.advanceTimeBy(100)
             Thread.sleep(100)
         }
@@ -89,7 +103,37 @@ class ManagerTest {
                    until(5_000) { m.safety.safetyCopies("choralroot").let { it.size > copies0 || it.any { s -> s.reason.contains("manager") } ||
                        it.firstOrNull()?.let { s -> s.kind == com.quixotic7.remotefm1.data.FlashHistory.Kind.EVENT &&
                            s.sha256 == com.quixotic7.remotefm1.FlashFile.sha256(flash.readBytes()) } == true } })
+        // (G, iOS 14c9b96) the page's confirm() is a real dialog: OK answers true (it was a Cancel: "Place all" did nothing)
+        page("setTimeout(() => { window.__c = confirm('Place all 128 sounds?'); }, 0); 1")
+        assertTrue("the dialog shows", until(5_000) { b.lastDialog?.isShowing == true })
+        rule.runOnUiThread { b.lastDialog!!.getButton(android.app.AlertDialog.BUTTON_POSITIVE).performClick() }
+        assertTrue("confirm() answered OK", pageUntil(5_000, "String(window.__c)", "true"))
+        page("setTimeout(() => { window.__p = prompt('Name?', 'BRASS'); }, 0); 1")
+        assertTrue(until(5_000) { b.lastDialog?.isShowing == true && b.dialogs >= 2 })
+        rule.runOnUiThread { b.lastDialog!!.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).performClick() }
+        assertTrue("prompt() cancelled: null", pageUntil(5_000, "String(window.__p)", "null"))
+        // (a download made in the page: to the share sheet's file)
+        page("(() => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['hello'])); " +
+             "a.download = 'test-backup.syx'; document.body.appendChild(a); a.click(); })(); 1")
+        assertTrue("the page's blob download was saved", until(10_000) { b.lastDownload == "test-backup.syx" })
         rule.runOnUiThread { a.overlay = null }                      // (Done)
         assertTrue(until(3_000) { a.overlay == null && ManagerBridge.current == null })
+    }
+
+    /** (G, iOS 391497e) a swipe in from the right edge opens the running firmware's editor; the back gesture closes it */
+    @Test fun rightEdgeSwipeOpensTheEditor() {
+        rule.runOnUiThread {
+            if (m.source != Source.TABLET) m.useSource(Source.TABLET)
+            if (m.selected != "choralroot") m.select("choralroot")
+            if (m.mode != Mode.CORE) m.useMode(Mode.CORE)
+        }
+        assertTrue(until(15_000) { m.engineStatus.optInt("booted") != 0 })
+        val a = (rule.activity as MainActivity).appUi
+        rule.mainClock.advanceTimeBy(500)
+        rule.onNodeWithTag("editor-edge").performTouchInput { swipeLeft(startX = right - 1f, endX = right - 300f) }
+        assertTrue("the editor is open", until(5_000) { a.overlay == Overlay.MANAGER })
+        rule.mainClock.advanceTimeBy(600)                           // (recomposed: the back handler on)
+        rule.runOnUiThread { rule.activity.onBackPressedDispatcher.onBackPressed() }
+        assertTrue("back closes it", until(3_000) { a.overlay == null })
     }
 }

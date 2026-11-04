@@ -3,6 +3,7 @@
 // Copied from RemoteFM1IOS edf2039 RFMKit/Sources/RFMCore/RFMWasmCore.cpp; changes (Android): SHA-256 in place of
 // CommonCrypto's (sha256() below), CLOCK_MONOTONIC in place of mach_absolute_time, the log through
 // __android_log_print (tag RFMWasm) in place of os_log, stat's st_mtim in place of st_mtimespec.
+// ain1 (live audio input) from RemoteFM1IOS 23bba90 and c5d5556 (diff 7a7cc49..d629aa0 applied).
 // Fantasy CFW delta from RemoteFM1IOS 7a7cc49 (the same file) applied; changes (Android): the memory budget is the one
 // the app sets (rfmw_set_memory_budget, from MemoryBudget.kt) in place of os_proc_available_memory.
 // WasmCore (M7): the core backend (RFMCoreBackend.h) over an .rfm1 module (docs/RFM1-FORMAT.md, version 1) in wasm3
@@ -295,13 +296,15 @@ const ImportSig HOST_IMPORTS[] = {
     {"fs_changed", {}, {I32}, "i()"},
 };
 const char *const HOST = "rfm1_host_1";
-const char *const KNOWN_NEEDS[] = {"fs1"};
+const char *const KNOWN_NEEDS[] = {"fs1", "ain1"};
 
 // section 2's exports: name, i32 arguments, i32 results
 enum {
     F_INITIALIZE, F_VERSION, F_GET, F_LAYOUT, F_ALLOC, F_FREE, F_OPTIONS, F_BOOT_OPTIONS, F_INIT, F_TICK, F_FRAME,
     F_IDLE, F_AUDIO, F_MIDI_IN, F_MIDI_OUT_TAKE, F_HALTED, F_SHUTDOWN, F_FLASH_STAGE, F_FLASH, F_FLASH_DIRTY,
-    F_FLASH_SYNC, F_STATS, F_UI_INFO, F_N
+    F_FLASH_SYNC, F_STATS, F_UI_INFO,
+    F_AUDIO_IN, F_AUDIO_IN_INFO,                        // (optional: ain1, live audio input)
+    F_N
 };
 const struct {
     const char *name;
@@ -313,7 +316,9 @@ const struct {
     {"rfm1_audio", 2, 0},      {"rfm1_midi_in", 1, 1},       {"rfm1_midi_out_take", 1, 1}, {"rfm1_halted", 0, 1},
     {"rfm1_shutdown", 0, 0},   {"rfm1_flash_stage", 2, 1},   {"rfm1_flash", 0, 1},        {"rfm1_flash_dirty", 0, 1},
     {"rfm1_flash_sync", 0, 1}, {"rfm1_stats", 2, 0},         {"rfm1_ui_info", 2, 0},
+    {"rfm1_audio_in", 2, 0},   {"rfm1_audio_in_info", 2, 0},
 };
+bool optionalExport(int f) { return f == F_INITIALIZE || f == F_AUDIO_IN || f == F_AUDIO_IN_INFO; }
 
 std::string base(const std::string &path)
 {
@@ -390,7 +395,8 @@ struct WasmFile {
     uint32_t memory_pages = 0;
     // a Fantasy CFW: "virtual", "needs", "folders"; fs: it imports rfm1_host_1
     bool isVirtual = false, fs = false;
-    std::vector<std::string> needs;
+    std::vector<std::string> needs, wants;
+    int ain = 0;                                // "ain1": 1 in "wants", 2 in "needs"
     FsModes modes;
 };
 
@@ -759,6 +765,18 @@ bool checkFile(WasmFile &f, std::string *err)
     }
     if (!f.needs.empty() && !f.isVirtual)
         return bad("its manifest lists \"needs\" but is not \"virtual\" (a Fantasy CFW)");
+    // "wants": what it uses when the host has it (unknown names ignored); ain1, live audio input
+    if (const Json *wn = m.get("wants")) {
+        if (wn->t != Json::Arr)
+            return bad("its manifest's \"wants\" is not a list of names");
+        for (const Json &x : wn->a) {
+            if (x.t != Json::Str)
+                return bad("its manifest's \"wants\" is not a list of names");
+            f.wants.push_back(x.s);
+        }
+    }
+    f.ain = std::find(f.needs.begin(), f.needs.end(), "ain1") != f.needs.end() ? 2
+          : std::find(f.wants.begin(), f.wants.end(), "ain1") != f.wants.end() ? 1 : 0;
     if (const Json *fo = m.get("folders")) {
         if (fo->t != Json::Obj)
             return bad("its manifest's \"folders\" is not an object");
@@ -798,19 +816,23 @@ bool checkFile(WasmFile &f, std::string *err)
     for (int i = 0; i < F_N; i++) {
         const Export *e = findExport(FN[i].name);
         if (!e) {
-            if (i == F_INITIALIZE)
+            if (optionalExport(i))                  // (_initialize; ain1's two, which only an input cart has)
                 continue;
             return bad(std::string("it has no export ") + FN[i].name + " (section 2)");
         }
+        const bool ainExport = i == F_AUDIO_IN || i == F_AUDIO_IN_INFO;
         if (e->kind != 0 || e->index < importedFuncs || e->index - importedFuncs >= funcs.size())
             return bad(std::string("its export ") + FN[i].name + " is not a function of its own");
         const uint32_t ti = funcs[e->index - importedFuncs];
         if (ti >= types.size())
             return bad(std::string("its export ") + FN[i].name + " has no type");
         const FuncType want{std::vector<uint8_t>(FN[i].nargs, I32), std::vector<uint8_t>(FN[i].nret, I32)};
-        if (types[ti].params != want.params || types[ti].results != want.results)
+        if (types[ti].params != want.params || types[ti].results != want.results) {
+            if (ainExport)                          // (not the spec's: ignored, as an engine may do; never called)
+                continue;
             return bad(std::string("its export ") + FN[i].name + " has the signature " +
                        sigText(types[ti].params, types[ti].results) + ", not " + sigText(want.params, want.results));
+        }
     }
     return true;
 }
@@ -894,7 +916,7 @@ constexpr int NLAYOUT = (int)(sizeof LAYOUT / sizeof LAYOUT[0]);
 constexpr uint32_t STR_CAP = 1024;          // the scratch block: a string, MIDI / stats words, the audio
 constexpr uint32_t WORDS = 16;
 constexpr uint32_t AUDIO_FRAMES = 2048;
-constexpr uint32_t SCRATCH = STR_CAP + WORDS + AUDIO_FRAMES * 4 + 16;
+constexpr uint32_t SCRATCH = STR_CAP + WORDS + AUDIO_FRAMES * 4 * 2 + 16;   // (the output, then ain1's input)
 constexpr uint32_t HALT_TRAP = 0x200;
 
 double usNow()
@@ -977,12 +999,17 @@ public:
         for (int i = 0; i < F_N; i++) {
             if (M3Result fr = m3_FindFunction(&fn_[i], rt_, FN[i].name)) {
                 fn_[i] = nullptr;
-                if (i == F_INITIALIZE)
+                if (optionalExport(i))
                     continue;
                 return bad(std::string("no export ") + FN[i].name + " (" + fr + ")");
             }
-            if (m3_GetArgCount(fn_[i]) != FN[i].nargs || m3_GetRetCount(fn_[i]) != FN[i].nret)
+            if (m3_GetArgCount(fn_[i]) != FN[i].nargs || m3_GetRetCount(fn_[i]) != FN[i].nret) {
+                if (i == F_AUDIO_IN || i == F_AUDIO_IN_INFO) {     // (not the spec's: as if absent)
+                    fn_[i] = nullptr;
+                    continue;
+                }
                 return bad(std::string("export ") + FN[i].name + ": the wrong number of arguments or results");
+            }
         }
         mem_ = m3_GetMemory(rt_, &memSize_, 0);
         if (!mem_ || memSize_ != f_->memory_pages * PAGE)
@@ -1051,6 +1078,7 @@ public:
         sStr_ = scratch_;
         sWords_ = scratch_ + STR_CAP;
         sAudio_ = (sWords_ + WORDS + 3u) & ~3u;
+        sAudioIn_ = sAudio_ + AUDIO_FRAMES * 4;
         loadUs_ = (uint32_t)(usNow() - t0);
         return true;
     }
@@ -1089,6 +1117,34 @@ public:
     void tick(uint32_t ms) override { fsApply(); call(F_TICK, ms); }
     void frame() override { fsApply(); call(F_FRAME); }
     void idle() override { fsApply(); call(F_IDLE); }
+    int audio_in_mode() const override { return f_ && (fn_[F_AUDIO_IN] || fn_[F_AUDIO_IN_INFO]) ? f_->ain : 0; }
+    void set_audio_in(AudioIn *in) override { ain_ = in; }
+
+    // ain1 (API.md section 6): rfm1_audio_in_info on a change, then rfm1_audio_in for the block, before rfm1_audio
+    void audioIn(uint32_t n)
+    {
+        if (!ain_ || !f_ || !f_->ain || dead_)
+            return;
+        const uint32_t ep = ain_->epoch.load(std::memory_order_acquire);
+        if (ep != ainEpoch_) {
+            ainEpoch_ = ep;
+            const int st = ain_->state.load(std::memory_order_relaxed) == 1 ? 1 : 0;
+            const uint32_t lat = st ? ain_->latency.load(std::memory_order_relaxed) : 0;
+            if (st != ainLive_ || lat != ainLat_ || st) {
+                if (st && !ainLive_)
+                    ain_->restart();
+                if (fn_[F_AUDIO_IN_INFO] && (st != ainLive_ || lat != ainLat_))
+                    call(F_AUDIO_IN_INFO, (uint32_t)st, lat);
+                ainLive_ = st;
+                ainLat_ = lat;
+            }
+        }
+        if (ainLive_ && fn_[F_AUDIO_IN] && !dead_) {
+            ain_->pull(reinterpret_cast<int16_t *>(mem_ + sAudioIn_), n);
+            call(F_AUDIO_IN, sAudioIn_, n);
+        }
+    }
+
     void audio(int16_t *stereo, uint32_t frames) override
     {
         fsApply();
@@ -1097,6 +1153,7 @@ public:
             if (dead_) {
                 std::memset(stereo, 0, (size_t)n * 4);
             } else {
+                audioIn(n);
                 call(F_AUDIO, sAudio_, n);
                 std::memcpy(stereo, mem_ + sAudio_, (size_t)n * 4);
             }
@@ -1145,6 +1202,9 @@ public:
     {
         if (shut_ || !rt_ || !fn_[F_SHUTDOWN])
             return;
+        if (ainLive_ && fn_[F_AUDIO_IN_INFO] && !dead_)      // (ain1: the input goes with the instance)
+            call(F_AUDIO_IN_INFO, 0, 0);
+        ainLive_ = 0;
         shut_ = true;
         if (w_.shutdown)
             call(F_SHUTDOWN);
@@ -1437,7 +1497,10 @@ private:
     IM3Function fn_[F_N] = {};
     uint8_t *mem_ = nullptr;
     uint32_t memSize_ = 0;
-    uint32_t desc_ = 0, scratch_ = 0, sStr_ = 0, sWords_ = 0, sAudio_ = 0;
+    uint32_t desc_ = 0, scratch_ = 0, sStr_ = 0, sWords_ = 0, sAudio_ = 0, sAudioIn_ = 0;
+    AudioIn *ain_ = nullptr;                    // (ain1) the engine's input ring
+    uint32_t ainEpoch_ = 0, ainLat_ = 0;
+    int ainLive_ = 0;
     core_w32 w_{};
     CoreDesc d_;
     fm1panel_t *panel_ = nullptr;
@@ -1509,6 +1572,7 @@ int rfmw_check(const char *path, rfmw_info_t *out, char *err, uint32_t n)
         out->load_us = c.loadUs();
         out->is_virtual = f->isVirtual ? 1 : 0;
         out->uses_folder = f->fs ? 1 : 0;
+        out->audio_in = (uint32_t)f->ain;
         std::string fo;
         auto mode = [&](const char *k, uint8_t m) {
             if (m)

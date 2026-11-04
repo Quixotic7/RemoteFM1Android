@@ -188,6 +188,17 @@ class Pages(val model: AppModel, val done: () -> Unit, val bluetooth: () -> Unit
                 "device" to "%.1f s, %d screens, %d keys".format(s.optInt("dev_ms") / 1000.0, s.optInt("snapshots"), s.optInt("keys_pressed")),
                 "core load" to "${s.optInt("cpu_pct")} % (its own); core thread ${s.optInt("core_load_pct")} %",
                 "render" to "avg ${s.optInt("render_avg_us")} us, max ${s.optInt("render_max_us")} us",
+                // (E) the core thread's priority and the screen: frame() time, redraws, waits (iOS 14c9b96, 3828820)
+                "core thread" to when (s.optInt("realtime")) { 1 -> "SCHED_FIFO"; 2 -> "nice -19 (audio)"; 3 -> "ordinary, nice -19 (Wasm)"; else -> "normal" } +
+                    ", avg ${s.optInt("core_avg_us")} us, max ${s.optInt("core_max_us")} us",
+                "screen" to "every ${s.optInt("frame_ms")} ms; frame() avg ${s.optInt("frame_avg_us")} us, max ${s.optInt("frame_max_us")} us, " +
+                    "${s.optInt("frames_drawn")} drawn, ${s.optInt("frames_deferred")} waited for the sound",
+                "audio input" to (s.optJSONObject("audio_in")?.let { i ->
+                    if (i.optInt("mode") == 0) "the firmware takes none" else if (i.optInt("open") == 0) "off" else
+                        "${i.optInt("rate")} Hz x${i.optInt("channels")}, burst ${i.optInt("frames_per_burst")}, " +
+                            "latency ${"%.1f".format(i.optDouble("latency_ms"))} ms, peak ${"%.2f".format(i.optDouble("peak"))}, " +
+                            "short ${i.optInt("short_frames")}, dropped ${i.optInt("dropped_frames")}"
+                } ?: "–"),
                 "audio" to if (a != null && a.optInt("running") != 0)
                     "${a.optString("api")} ${a.optInt("rate")} Hz x${a.optInt("channels")}, ${a.optString("sharing")}" +
                         if (a.optInt("performance") == 12) ", low latency" else ""

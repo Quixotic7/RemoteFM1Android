@@ -59,3 +59,6 @@ target_link_libraries(rfmcore PRIVATE wasm3)
 # (Fantasy CFW) a Fantasy CFW's file API (RFMFileApi.cpp, from RemoteFM1IOS 7a7cc49), the RemoteFM1 folder over JNI
 # (android/rfm_folder_jni.cpp) and the loader's test C API for the instrumented tests (rfm_wasm_test_jni.cpp)
 target_sources(rfmcore PRIVATE ${R}/RFMFileApi.cpp ${R}/android/rfm_folder_jni.cpp ${R}/rfm_wasm_test_jni.cpp)
+
+# (ain1, RemoteFM1IOS c47ac4f) the audio input: an Oboe input stream into the engine's input ring
+target_sources(rfmcore PRIVATE ${R}/RFMOboeInput.cpp)

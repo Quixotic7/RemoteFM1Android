@@ -1,0 +1,6 @@
+{
+  "about": "The newest RemoteFM1 Android release. The app reads this at launch (firmware/UpdateNotice.kt) and tells testers on an older build. Set build to the new APK's versionCode when a release is out.",
+  "build": 1,
+  "version": "0.1.0",
+  "url": "https://github.com/Quixotic7/RemoteFM1Android/releases/latest"
+}

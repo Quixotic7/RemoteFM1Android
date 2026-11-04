@@ -1,44 +1,81 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
-// Ported from RemoteFM1IOS edf2039 RFMKit/Sources/RFMKit/Managers/ManagerBridge.swift
-// The firmwares' own web managers (iOS PLAN.md section 18 step 5), as remotefm1.com hosts them: managers/<id>/. In
-// the app the page gets a whole Web MIDI injected at document start (ManagerPage.WEB_MIDI): one port each way named as
-// the firmware's USB port, sysex granted, the site's fm1-shim.js told to stand aside. What the page sends goes to the
-// running firmware's MIDI in (SysEx whole: rfme_sysex_in; the rest: rfme_midi_in to the firmware); what the firmware
-// sends (rfme_midi_out_take's USB-MIDI packets, put back together by UsbMidiDecoder) goes to the page.
-//   ManagerList     the managers the site has, by firmware id, and each firmware's USB port name
+// Ported from RemoteFM1IOS d629aa0 RFMKit/Sources/RFMKit/Managers/ManagerBridge.swift (f47cdd4, 95d5d16, f02182b,
+// 1d88c11, 391497e, dc771c8, f6e6eaa)
+// The firmwares' own web editors (iOS PLAN.md section 18 step 5), opened at their authors' pages. The app injects a
+// whole Web MIDI into the page (ManagerBridge.WEB_MIDI): one port named as the firmware's USB port, MIDI both ways
+// through a @JavascriptInterface. What the page sends goes to the running firmware's MIDI in (SysEx whole:
+// rfme_sysex_in; the rest: rfme_midi_in to the firmware); what the firmware sends (rfme_midi_out_take's USB-MIDI
+// packets, put back together by UsbMidiDecoder) goes to the page.
+//   ManagerList     the authors' editor pages by firmware id, each firmware's USB port name, the screen reader
 //   UsbMidiDecoder  USB-MIDI event packets -> whole MIDI messages (SysEx across packets)
 package com.quixotic7.remotefm1.managers
 
-/** the site's managers (web/managers/managers.json at RemoteFM1's main, as remotefm1.com serves them) */
+import com.quixotic7.remotefm1.firmware.AvailableFirmware
+
+/** the firmwares' editors: always the author's own page (the owner, 2026-11-01). remotefm1.com's copies fell behind
+ *  their authors' pages; the app needs no copy, as its Web MIDI works on any page */
 object ManagerList {
-    const val HOST = "remotefm1.com"
-    const val BASE = "https://remotefm1.com/managers/"
-
-    /** firmware id -> its manager's folder on the site */
-    val managers: Map<String, String> = mapOf(
-        "choralroot" to "choralroot", "purplemonkey" to "choralroot", "felucca" to "felucca", "melodee" to "melodee",
-        "jiant" to "jiant", "ghoulbox" to "ghoulbox",
+    /** the authors' pages for the firmwares the catalog may not list an editor for (or before the catalog is read) */
+    val authors: Map<String, String> = mapOf(
+        "choralroot" to "https://quixotic7.github.io/ChoralRootFM1/webapp/installer/manager.html",
+        "purplemonkey" to "https://quixotic7.github.io/ChoralRootFM1/webapp/installer/manager.html",
+        "felucca" to "https://hugelton.github.io/Felucca/webapp/editor/",
+        "melodee" to "https://keremimo.github.io/melodee/webapp/editor/",
+        "jiant" to "https://juanjiant-bit.github.io/JIANT/webapp/editor/",
+        "ghoulbox" to "https://jasonpersinger.me/ghoulbox-fm1-dungeon-synth/webapp/editor/",
+        // (not in the site catalog's editors: Mutable Dreams is listed there as "mutable"; Rainbow Mode has Felucca's
+        // editor on its own site. Hortator's site has one too, but its firmware answers no editor: RemoteFM1FW 5bcbb65)
+        "mutabledreams" to "https://mutable-dreams.kidbee85.chatgpt.site/#device-editor",
+        "rainbow" to "https://joshbartlettband-web.github.io/felucca-rainbow/webapp/editor/",
+        "fizz" to "https://quixotic7.github.io/FIZZ/manager/",     // (built in; not in the catalogs)
     )
 
-    /** each firmware's real USB MIDI port name: the name the page's port takes (managers.json "ports") */
+    /** each firmware's real USB MIDI port name (its USB iProduct string, which its editor matches): RemoteFM1FW's
+     *  catalog `port` (31b8751) wins; this list is the fallback, the same names */
     val ports: Map<String, String> = mapOf(
-        "choralroot" to "ChoralRoot FM-1", "purplemonkey" to "ChoralRoot FM-1", "coralflower" to "CoralFlower FM-1",
-        "felucca" to "Felucca", "ghoulbox" to "Felucca", "amb" to "Felucca", "obervave" to "Felucca", "frodhes" to "Felucca",
-        "melodee" to "Melodee FM-1", "jiant" to "JIANT FM", "fomni" to "FoMni FM-1", "fimba" to "FiMba FM-1",
-        "loom" to "LOOM-8 FM-1", "duell" to "DUELL", "minitone" to "Felucca", "fmini" to "FM-1 Midi", "skiff" to "Felucca",
-        "grimm" to "Felucca", "pigeon" to "PIGEON", "tonitor" to "FM-1 Tonitor", "speak37" to "Speak37",
+        "amb" to "AMB-1 FM-1", "aurora" to "Felucca", "caravel" to "Caravel", "choralroot" to "ChoralRoot FM-1",
+        "clipper" to "Clipper", "coralflower" to "CoralFlower FM-1", "duell" to "DUELL", "fartmachine" to "FoMni FM-1",
+        "felucca" to "Felucca", "fimba" to "FiMba FM-1", "fmini" to "FM-1 Midi", "fomni" to "FoMni FM-1",
+        "frasil" to "FRASIL FM-1", "frodhes" to "Felucca", "ghoulbox" to "Felucca", "grimm" to "Felucca",
+        "hortator" to "Hortator", "hyp1" to "HYP-1 FM-1", "jiant" to "FM-1", "karma" to "FM-1 KARMA", "loom" to "LOOM-8 FM-1",
+        "melodee" to "Melodee FM-1", "minitone" to "Felucca", "mutabledreams" to "Mutable Dreams FM-1",
+        "niagaradrift" to "Niagara Drift FM-1", "obervave" to "Felucca", "pigeon" to "PIGEON",
+        "purplemonkey" to "ChoralRoot FM-1", "rainbow" to "Felucca", "remotefm1" to "FM-1", "ripple" to "Ripple FM-1",
+        "s1vave" to "Felucca", "skiff" to "Felucca", "sloop" to "Felucca", "speak37" to "Speak37", "tonitor" to "FM-1 Tonitor",
+        "x0x" to "X0X FM-1", "zen1" to "ZEN-1 FM-1",
     )
 
-    /** the manager page for a firmware, null: none */
-    fun url(firmwareId: String): String? = managers[firmwareId]?.let { "$BASE$it/" }
+    /** Charles Vestal's FM-1 Screen Reader: reads out what the screen shows, for any firmware with its announce.c.
+     *  Opened like an editor, the app's Web MIDI in it */
+    const val READER = "https://charlesvestal.github.io/fm1-reader/"
+    /** the firmwares that speak to it (its README's list, 2026-11-01) */
+    val readerFirmwares: Set<String> = setOf("x0x", "fomni", "amb", "polly", "monk", "mocky", "ctl", "ctl1")
 
-    fun port(firmwareId: String, name: String): String = ports[firmwareId] ?: name
+    fun hasReader(firmwareId: String): Boolean = firmwareId in readerFirmwares
 
-    /** the page may talk to the player: https on remotefm1.com only */
-    fun trusted(url: String?): Boolean {
+    /** the author's editor known to the app, null: none */
+    fun url(firmwareId: String): String? = authors[firmwareId]
+
+    /** the port the editor page sees: RemoteFM1FW's catalog `port`, else the app's list, else the firmware's name */
+    fun port(firmwareId: String, name: String, details: Map<String, AvailableFirmware> = emptyMap()): String {
+        details[firmwareId]?.port?.takeIf { it.isNotEmpty() }?.let { return it }
+        return ports[firmwareId] ?: name
+    }
+
+    /** the editor page to open: the catalog's `editor` (the author's page, https only), else the one the app knows;
+     *  null: none */
+    fun editor(firmwareId: String, details: Map<String, AvailableFirmware>): String? {
+        details[firmwareId]?.editor?.takeIf { https(it) }?.let { return it }
+        return url(firmwareId)
+    }
+
+    /** a page the player talks to: any https page (the authors' sites; iOS gives every page its Web MIDI) */
+    fun trusted(url: String?): Boolean = https(url)
+
+    private fun https(url: String?): Boolean {
         val u = runCatching { java.net.URI(url ?: return false) }.getOrNull() ?: return false
-        return u.scheme == "https" && u.host == HOST
+        return u.scheme == "https" && !u.host.isNullOrEmpty()
     }
 }
 

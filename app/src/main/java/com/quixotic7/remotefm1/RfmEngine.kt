@@ -201,6 +201,60 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
     /** The core's MIDI out packets (USB-MIDI) into [out]; how many (one reader at a time). */
     fun midiOutTake(out: IntArray): Int = nativeMidiOutTake(handle, out)
 
+    // ---- speed (iOS 836a983, 3828820, 14c9b96, dfbc827: PerfGuard and the battery)
+    /** The ring's headroom beyond one host buffer (rfme_set_latency; 6 ms by default, PerfGuard's per firmware). */
+    fun setLatency(headroomUs: Int, minBufferFrames: Int = 0) = nativeSetLatency(handle, headroomUs, minBufferFrames)
+
+    /** The core thread at audio priority (true, the default) or an ordinary high-priority thread (a Wasm core). */
+    fun setRealtime(on: Boolean) = nativeSetRealtime(handle, on)
+
+    private var batteryFrameMs = PerfGuard.DEFAULT_FRAME_MS
+    private var perfFrameMs = PerfGuard.DEFAULT_FRAME_MS
+
+    /** (the battery) how often the firmware redraws its screen: 15 ms normally, slower when nobody sees it; the
+     *  slower of this and PerfGuard's rate is used (iOS CorePlayer.setFrameMs) */
+    fun setFrameMs(ms: Int) {
+        batteryFrameMs = ms
+        nativeSetFrameMs(handle, maxOf(ms, perfFrameMs))
+    }
+
+    /** (PerfGuard) the screen rate this firmware keeps up with */
+    fun setPerfFrameMs(ms: Int) {
+        perfFrameMs = ms
+        nativeSetFrameMs(handle, maxOf(batteryFrameMs, ms))
+    }
+
+    // ---- (ain1) live audio input (iOS 23bba90, c47ac4f)
+    /** The running core: 0 takes no input, 1 its manifest "wants" ain1, 2 "needs" it. */
+    val audioInMode: Int get() = nativeAinMode(handle)
+
+    /** Input live or off; [latencyFrames] the round trip at 44.1 kHz (0 unknown); [targetFrames] the ring's level (0 keeps it). */
+    fun audioInSet(on: Boolean, latencyFrames: Int, targetFrames: Int = 0) = nativeAinSet(handle, on, latencyFrames, targetFrames)
+
+    /** Tests: interleaved stereo int16 at 44.1 kHz into the input ring. */
+    fun audioInPush(stereo: ShortArray, frames: Int = stereo.size / 2) = nativeAinPush(handle, stereo, frames)
+
+    /** Tests: float input at [rate] ([right] null: mono) through the engine's resampler to 44.1 kHz. */
+    fun audioInPushF32(left: FloatArray, right: FloatArray?, frames: Int, rate: Double) =
+        nativeAinPushF32(handle, left, right, frames, rate)
+
+    /** (may block in Android: never the main thread) the input on [deviceId] (0: the default mic) feeding the
+     *  engine's input ring; null or the error. RECORD_AUDIO must be granted. */
+    fun inputStart(deviceId: Int = 0): String? = nativeInputStart(handle, deviceId).ifEmpty { null }
+
+    /** (may block) the input closed */
+    fun inputStop() = nativeInputStop(handle)
+
+    /** (may block) the input's own latency in ms; -1 unknown, -2 no input */
+    fun inputLatencyMs(): Double = nativeInputLatencyMs(handle)
+
+    // ---- tests: a phone's audio callback and CPU on the emulator
+    /** rfme_render of [buffer] frames at [rate] every buffer period by the wall clock (the clock AUDIO) until [testPacedStop] */
+    fun testPacedStart(buffer: Int, rate: Double = 48000.0): Boolean = nativeTestPacedStart(handle, buffer, rate)
+    fun testPacedStop() = nativeTestPacedStop(handle)
+    /** the core thread's every chunk takes [factor] times as long (a slower CPU) */
+    fun testSlowdown(factor: Float) = nativeTestSlowdown(handle, factor)
+
     override fun close() {
         if (handle != 0L) {
             nativeDestroy(handle)
@@ -232,6 +286,9 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
 
         /** {"cores": [{id, name, version, ...}], "errors": "..."} */
         fun cores(): JSONObject = JSONObject(nativeCores())
+
+        /** (ain1) the .rfm1 at [path]: 0 takes no audio input, 1 its manifest wants it, 2 needs it; -1 not valid */
+        fun audioInOf(path: String): Int = nativeAudioInOf(path)
 
         @JvmStatic private external fun nativeScan(dir: String): Int
         @JvmStatic private external fun nativeCores(): String
@@ -287,5 +344,19 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         @JvmStatic private external fun nativeLearn(h: Long, armed: Boolean)
         @JvmStatic private external fun nativeLearnTake(h: Long, msg: ByteArray): Boolean
         @JvmStatic private external fun nativeMidiOutTake(h: Long, out: IntArray): Int
+        @JvmStatic private external fun nativeSetLatency(h: Long, headroomUs: Int, minBuffer: Int)
+        @JvmStatic private external fun nativeSetRealtime(h: Long, on: Boolean)
+        @JvmStatic private external fun nativeSetFrameMs(h: Long, ms: Int)
+        @JvmStatic private external fun nativeAinMode(h: Long): Int
+        @JvmStatic private external fun nativeAinSet(h: Long, on: Boolean, latency: Int, target: Int)
+        @JvmStatic private external fun nativeAinPush(h: Long, stereo: ShortArray, frames: Int)
+        @JvmStatic private external fun nativeInputStart(h: Long, device: Int): String
+        @JvmStatic private external fun nativeAinPushF32(h: Long, l: FloatArray, r: FloatArray?, frames: Int, rate: Double)
+        @JvmStatic private external fun nativeInputStop(h: Long)
+        @JvmStatic private external fun nativeInputLatencyMs(h: Long): Double
+        @JvmStatic private external fun nativeTestPacedStart(h: Long, buffer: Int, rate: Double): Boolean
+        @JvmStatic private external fun nativeTestPacedStop(h: Long)
+        @JvmStatic private external fun nativeTestSlowdown(h: Long, f: Float)
+        @JvmStatic private external fun nativeAudioInOf(path: String): Int
     }
 }

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // Ported from RemoteFM1IOS edf2039 RFMKit/Sources/RFMKit/FirmwareStore.swift (and FirmwareThumbs.swift's
-// FirmwareStore.details).
+// FirmwareStore.details); updated to d629aa0 (fe93170: RemoteFM1FW's catalog images; 9494ebe + 3828820:
+// FirmwareVersions.swift, every release's versions and dates; ac7254d: Update all).
 //
 // Get firmware: FirmwareStore reads the feeds (FirmwareFeeds.kt), keeps the last good list of each in the app's cache
 // (cache/Firmware catalog/feeds.json: shown offline, with its date), and downloads and installs one firmware at a time.
@@ -17,6 +18,12 @@
 //                is kept (a way back if the new one doesn't read the memory) and the rest removed (willReplace first:
 //                the app moves its selection to the new file). Saved choices of a removed file fall back to the same
 //                id (CoreRef.resolve)
+//
+//   images       RemoteFM1FW's catalog images fetched into thumbs' catalog folder after a check: one that is new, moved,
+//                or older than the latest release; one that fails keeps the copy there (catalog/index.json: by id,
+//                "<release> <url>", iOS's)
+//   versions     every RemoteFM1FW release read on demand (a firmware's page, the States page), at most once an hour,
+//                cached in versions.json beside feeds.json: each firmware's older versions and when each came out
 //
 // Nothing here selects or runs a firmware. Threads: refresh and install block (call them off the main thread, or use
 // the *Async forms, which run on the store's own threads); the state is StateFlows; callbacks come on the calling
@@ -154,6 +161,8 @@ class FirmwareStore(
     private val tmpDir: File = cacheFile.parentFile ?: File("."),
     private val now: () -> Instant = { Instant.now() },
     private val log: (String) -> Unit = {},
+    /** where RemoteFM1FW's catalog images are kept (null: not fetched) */
+    val thumbs: FirmwareThumbs? = null,
 ) {
     data class Progress(val id: String, val received: Long = 0, val expected: Long = 0) {
         val fraction: Double? get() = if (expected > 0) minOf(1.0, received.toDouble() / expected) else null
@@ -167,6 +176,9 @@ class FirmwareStore(
     private val _progress = MutableStateFlow<Progress?>(null)
     private val _message = MutableStateFlow("")
     private val _failure = MutableStateFlow("")
+    private val _allVersions = MutableStateFlow<Map<String, List<AvailableFirmware>>>(emptyMap())
+    private val _versionsLoading = MutableStateFlow(false)
+    private val _updatingAll = MutableStateFlow<Pair<Int, Int>?>(null)
 
     /** each feed's last good list (feed order) */
     val snapshots: StateFlow<List<FeedSnapshot>> = _snapshots
@@ -182,6 +194,13 @@ class FirmwareStore(
     /** the last install's result ("Installed AMB-1 1.3.", "Updated ...", "Cancelled."), and its error */
     val message: StateFlow<String> = _message
     val failure: StateFlow<String> = _failure
+    /** (FirmwareVersions.swift) every version on GitHub, by id, newest first; when it was read */
+    val allVersions: StateFlow<Map<String, List<AvailableFirmware>>> = _allVersions
+    @Volatile var versionsChecked: Instant? = null
+        private set
+    val versionsLoading: StateFlow<Boolean> = _versionsLoading
+    /** Update all running: (this one, from 1; how many); null not running */
+    val updatingAll: StateFlow<Pair<Int, Int>?> = _updatingAll
 
     /** before an update removes older files (old, new): the app moves its selection (a worker thread) */
     @Volatile var willReplace: ((List<ImportedFirmware>, ImportedFirmware) -> Unit)? = null
@@ -191,10 +210,12 @@ class FirmwareStore(
     private val lock = Any()
     @Volatile private var attempted: Instant? = null
     private val cancelFlag = AtomicBoolean(false)
+    private val stopAll = AtomicBoolean(false)
     private val workers = Executors.newCachedThreadPool { r -> Thread(r, "rfm-firmware").apply { isDaemon = true } }
 
     init {
         loadCache()
+        loadVersionsCache()
     }
 
     /** when the list was read: the oldest feed's last good answer (null: never) */
@@ -212,9 +233,8 @@ class FirmwareStore(
      *  the merged list's */
     val details: Map<String, AvailableFirmware>
         get() {
-            val out = LinkedHashMap<String, AvailableFirmware>()
+            val out = LinkedHashMap(FeedSnapshot.details(_snapshots.value))
             for (e in _available.value) out[e.id] = e
-            for (s in _snapshots.value) for ((k, v) in s.details) if (k !in out) out[k] = v
             return out
         }
 
@@ -241,7 +261,8 @@ class FirmwareStore(
                     val s = runCatching { FeedSnapshot.parse(d, f, t) }.getOrNull()
                     if (s != null) {
                         snaps.add(s)
-                        lines.add("${f.name}: ${d.size} bytes, ${s.firmware.size} to download")
+                        lines.add("${f.name}: ${d.size} bytes, " +
+                            if (f.kind == FirmwareFeed.Kind.CATALOG) "${s.details.size} cards" else "${s.firmware.size} to download")
                         continue
                     }
                     val head = String(d.copyOf(minOf(80, d.size)), Charsets.UTF_8).replace("\n", " ").trim()
@@ -261,6 +282,7 @@ class FirmwareStore(
             _report.value = lines
             _problem.value = problems.toSet().sorted().joinToString(" ")
             saveCache()
+            syncImages()
             log("checked ${feeds.size} feed(s): ${_available.value.size} firmware, ${problems.size} problem(s)")
         } finally {
             _checking.value = false
@@ -275,6 +297,139 @@ class FirmwareStore(
         val c = checked
         if (_snapshots.value.size == feeds.size && c != null && t.toEpochMilli() - c.toEpochMilli() < maxAgeMs) return
         refresh()
+    }
+
+    /** RemoteFM1FW's catalog images fetched into thumbs' catalog folder (see the top); blocks */
+    fun syncImages() {
+        val th = thumbs ?: return
+        val dir = th.catalogFile("x").parentFile ?: return
+        val indexFile = File(dir, "index.json")
+        val index = HashMap<String, String>()
+        runCatching { MiniJson.parse(indexFile.readText()).obj()?.forEach { (k, v) -> (v as? String)?.let { index[k] = it } } }
+        val release = _snapshots.value.firstNotNullOfOrNull { it.release } ?: ""
+        dir.mkdirs()
+        var got = 0
+        var failed = 0
+        for ((id, d) in FeedSnapshot.details(_snapshots.value).toSortedMap()) {
+            if (d.image.isEmpty() || !d.image.lowercase().startsWith("https://")) continue
+            val key = "$release ${d.image}"
+            val dst = th.catalogFile(id)
+            if (index[id] == key && dst.isFile) continue
+            val tmp = File(dir, ".${UUID.randomUUID()}")
+            try {
+                transport.download(d.image, tmp, 2L shl 20, { _, _ -> }, { false })
+                if (!looksLikeImage(tmp)) throw FirmwareStoreError.Unreadable(d.image.substringAfterLast('/'))
+                dst.delete()
+                if (!tmp.renameTo(dst)) throw IOException("can't move ${tmp.name}")
+                index[id] = key
+                got++
+            } catch (e: Throwable) {
+                tmp.delete()
+                failed++
+            }
+        }
+        if (got == 0 && failed == 0) return
+        runCatching {
+            val t = File(dir, "index.json.tmp")
+            t.writeText(MiniJson.write(index.toSortedMap()))
+            if (!t.renameTo(indexFile)) t.delete()
+        }
+        if (got > 0) th.reload()
+        log("catalog images: $got new, $failed failed")
+    }
+
+    // ---- older versions (FirmwareVersions.swift)
+
+    private val versionsFile: File get() = File(cacheFile.parentFile ?: File("."), "versions.json")
+
+    private fun loadVersionsCache() {
+        val m = runCatching { MiniJson.parse(versionsFile.readText()).obj() }.getOrNull() ?: return
+        val v = m["versions"].obj()?.mapValues { (_, l) -> l.arr()?.mapNotNull { AvailableFirmware.fromMap(it.obj()) } ?: emptyList() }
+            ?: return
+        _allVersions.value = v
+        // (a cache with no release dates: read again)
+        versionsChecked = if (v.values.any { l -> l.any { it.released != null } })
+            m.str("fetched")?.let { runCatching { Instant.parse(it) }.getOrNull() } else null
+    }
+
+    /** the releases read again when the list is older than [maxAgeMs] (a failure keeps the cached list); blocks */
+    fun loadVersions(maxAgeMs: Long = 3_600_000) {
+        versionsChecked?.let { if (now().toEpochMilli() - it.toEpochMilli() < maxAgeMs) return }
+        synchronized(lock) {
+            if (_versionsLoading.value) return
+            _versionsLoading.value = true
+        }
+        try {
+            val d = runCatching { transport.data(FirmwareFeed.ALL_RELEASES) }.getOrNull() ?: return
+            val v = runCatching { FeedSnapshot.versions(d, FirmwareFeed.RELEASES.name) }.getOrNull() ?: return
+            val t = now()
+            _allVersions.value = v
+            versionsChecked = t
+            runCatching {
+                versionsFile.parentFile?.mkdirs()
+                val tmp = File(versionsFile.path + ".tmp")
+                tmp.writeText(MiniJson.write(linkedMapOf("fetched" to t.toString(),
+                    "versions" to v.mapValues { (_, l) -> l.map { it.toMap() } })))
+                if (!tmp.renameTo(versionsFile)) tmp.delete()
+            }
+        } finally {
+            _versionsLoading.value = false
+        }
+    }
+
+    fun loadVersionsAsync(maxAgeMs: Long = 3_600_000) { workers.execute { loadVersions(maxAgeMs) } }
+
+    /** a firmware's versions, newest first, each with the catalog's details */
+    fun versions(id: String): List<AvailableFirmware> {
+        val d = details[id]
+        return (_allVersions.value[id] ?: emptyList()).map { orig ->
+            val e = orig.copy()
+            if (d != null) e.fill(d, FirmwareVersion.compare(d.version, e.version) == 0)
+            if (e.name.isEmpty()) e.name = AvailableFirmware.nameFromId(id)
+            e
+        }
+    }
+
+    /** when a firmware's newest version came out (the releases); null: not known yet */
+    fun updated(id: String): Instant? {
+        val v = _allVersions.value[id] ?: return null
+        return v.firstOrNull()?.released ?: v.mapNotNull { it.released }.maxOrNull()
+    }
+
+    /** one version of a firmware (the latest list's entry when it is that version) */
+    fun version(id: String, v: String): AvailableFirmware? =
+        _available.value.firstOrNull { it.id == id && it.version == v } ?: versions(id).firstOrNull { it.version == v }
+
+    // ---- Update all (ac7254d)
+
+    /** each entry installed in turn; [stopUpdates] stops it (a failure doesn't stop the rest: [failure] says it);
+     *  blocks. Returns how many were tried */
+    fun updateAll(list: List<AvailableFirmware>): Int {
+        synchronized(lock) {
+            if (_updatingAll.value != null) return 0
+            stopAll.set(false)
+            _updatingAll.value = 0 to list.size
+        }
+        var n = 0
+        try {
+            for (e in list) {
+                if (stopAll.get()) break
+                _updatingAll.value = (n + 1) to list.size
+                install(e)
+                n++
+            }
+        } finally {
+            _updatingAll.value = null
+        }
+        return n
+    }
+
+    fun updateAllAsync(list: List<AvailableFirmware>) { workers.execute { updateAll(list) } }
+
+    /** Update all stopped (the running download cancelled) */
+    fun stopUpdates() {
+        stopAll.set(true)
+        cancel()
     }
 
     fun refreshAsync() { workers.execute { refresh() } }
@@ -387,7 +542,9 @@ class FirmwareStore(
             for (o in old) library.delete(o)
             didChange?.invoke()
         }
-        _message.value = if (older.isEmpty()) "Installed ${f.name} ${f.version}."
+        val newer = library.files.value.any { it.error == null && it.coreID == f.coreID && FirmwareVersion.less(f.version, it.version) }
+        _message.value = if (newer) "Installed ${f.name} ${f.version} beside the newer one."
+        else if (older.isEmpty()) "Installed ${f.name} ${f.version}."
         else "Updated ${f.name} to ${f.version}. " + (kept?.let { "${it.version} is kept: delete it when you're happy." } ?: "")
         log("${_message.value} (${f.file}; kept ${kept?.file ?: "-"}; removed ${old.map { it.file }})")
         return f
@@ -402,6 +559,15 @@ class FirmwareStore(
             val n = file.length()
             if (d.size > 0 && n != d.size) throw FirmwareStoreError.Size(d.size, n)
             if (d.sha256.isNotEmpty() && sha256(file) != d.sha256) throw FirmwareStoreError.Checksum
+        }
+
+        /** a PNG, JPEG, GIF or WebP by its first bytes (BitmapFactory reads it later) */
+        fun looksLikeImage(f: File): Boolean {
+            val b = runCatching { f.inputStream().use { i -> ByteArray(12).also { n -> if (i.read(n) < 12) return false } } }.getOrNull()
+                ?: return false
+            fun at(o: Int, s: String) = s.indices.all { b[o + it] == s[it].code.toByte() }
+            return (b[0] == 0x89.toByte() && at(1, "PNG")) || (b[0] == 0xFF.toByte() && b[1] == 0xD8.toByte()) ||
+                at(0, "GIF8") || (at(0, "RIFF") && at(8, "WEBP"))
         }
 
         fun sha256(file: File): String {

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // Copied from RemoteFM1IOS 0d1a98b RFMKit/Sources/RFMCore/RFMDevice.cpp; changes: rfm::nowTicks instead of mach_absolute_time.
+// RemoteFM1IOS 14c9b96 and dfbc827 (the frame period, frame() deferred while the audio is low) ported; frame() counted
+// and summed for the average (Android's Diagnostics).
 // The device clock (RFMDevice.h): FM1VST v0.6.2's engine/device.cpp over CoreBackend.
 #include "RFMDevice.h"
 
@@ -70,7 +72,11 @@ void CoreDevice::run_ms()
 {
     const uint32_t ms = dev_ms_++;
     b_.tick(ms);
-    const bool frame = ms == 0 || ms - last_frame_ >= 15u;
+    bool frame = ms == 0 || ms - last_frame_ >= frame_ms_.load(std::memory_order_relaxed);
+    if (frame && behind_ && ms != 0 && ms - last_frame_ < 200u) {   // (the sound first: the redraw waits)
+        frame = false;
+        deferred_++;
+    }
     if (between_)
         between_(ms, frame);
     if (frame) {
@@ -78,6 +84,8 @@ void CoreDevice::run_ms()
         const uint64_t t0 = nowTicks();
         b_.frame();
         frame_last_ = nowTicks() - t0;
+        frame_sum_ += frame_last_;
+        frames_drawn_++;
         if (frame_last_ > frame_max_)
             frame_max_ = frame_last_;
     } else {

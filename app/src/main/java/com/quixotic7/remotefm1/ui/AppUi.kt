@@ -47,7 +47,9 @@ data class UiLaunch(
     val demoMap: Boolean = false,       // (A6) a few mappings, as if learned (screenshots)
     val sheetScroll: String? = null,    // (A6) the MIDI & audio page scrolled to: knobs | omx
     val openManager: Boolean = false,   // (A6) the running firmware's web editor open
+    val openReader: Boolean = false,    // (G, iOS -openreader) the screen reader open
     val modeSource: String? = null,     // (A6) the mode page's mapping (a source id)
+    val updateNotice: Boolean = false,  // (F, iOS -updatenotice) the launch notice shown anyway, its dismissal ignored
 ) {
     companion object {
         fun from(b: Bundle?): UiLaunch {
@@ -65,7 +67,8 @@ data class UiLaunch(
                 peel = s("peel")?.toFloatOrNull(), displayAlone = flag("displayalone"), steps = flag("steps"), page = s("page"),
                 installDemo = demo("installdemo"), cartDemo = demoFlag("cartdemo"), fm1Prompt = demo("fm1prompt"),
                 learn = flag("learn"), learnPick = s("learnpick"), demoMap = demoFlag("demomap"), sheetScroll = s("sheetscroll"),
-                openManager = flag("openmanager"), modeSource = s("modesource"),
+                openManager = flag("openmanager"), openReader = flag("openreader"), modeSource = s("modesource"),
+                updateNotice = flag("updatenotice"),
             )
         }
     }
@@ -75,13 +78,14 @@ data class UiLaunch(
 enum class SheetPageId(val raw: String) {
     FIRMWARE("firmware"), ABOUT("about"), STATES("states"), SAFETY("safetycopies"), GET_FIRMWARE("getfirmware"),
     MIDI("midi"), AUDIO_OUTPUT("audiooutput"), SETTINGS("settings"), INSTALL("install"), CART("cart"),
-    MIDI_INPUT("midiinput"), KEY_CHANNEL("keychannel"), MIDI_MODE("midimode");
+    MIDI_INPUT("midiinput"), KEY_CHANNEL("keychannel"), MIDI_MODE("midimode"),
+    TRANSFER("transfer");           // (F, iOS 9494ebe) From another device: an opened .rfm1transfer
 
     companion object { fun of(s: String?) = entries.firstOrNull { it.raw == s } }
 }
 
 /** a page over everything (iOS's full-screen covers) */
-enum class Overlay { DIAGNOSTICS, BLUETOOTH, MANAGER }
+enum class Overlay { DIAGNOSTICS, BLUETOOTH, MANAGER, READER }
 
 class AppUi(ctx: Context, val model: AppModel, val launch: UiLaunch) {
     private val prefs = ctx.getSharedPreferences("rfm1", Context.MODE_PRIVATE)
@@ -101,6 +105,13 @@ class AppUi(ctx: Context, val model: AppModel, val launch: UiLaunch) {
         private set
     /** "This phone" or "This tablet" */
     val deviceWord: String = if (ctx.resources.configuration.smallestScreenWidthDp >= 600) "tablet" else "phone"
+    /** (F) the firmware lists' sort and Get firmware's filter */
+    val listPrefs = FirmwareListPrefs.of(ctx)
+    /** (F) the firmware sidebar (a swipe in from the left edge) */
+    var sidebarOpen by mutableStateOf(false)
+    /** (F) an opened .rfm1transfer: what came in, or why it wasn't read (the From another device page) */
+    var transfer by mutableStateOf<com.quixotic7.remotefm1.data.TransferFile.Report?>(null)
+    var transferNote by mutableStateOf("")
 
     /** (MainActivity) a document picker: [PICK_FIRMWARE], [PICK_BACKUP], [PICK_CART]; the share sheet for a file */
     var pickFiles: ((String) -> Unit)? = null
@@ -116,6 +127,8 @@ class AppUi(ctx: Context, val model: AppModel, val launch: UiLaunch) {
     var fm1: FM1PagesModel = appFm1
     /** (the cartridge page) Replace…: the bank slot the picked file goes to; null: added to the list */
     var cartReplaceSlot: Int? = null
+    /** (dc771c8) where the cartridge page goes back to: Settings, or Firmware when opened as RemoteFM1's editor */
+    var cartBackTitle by mutableStateOf("Settings")
 
     init {
         model.engine.setButtonNames(buttonNames)
@@ -136,6 +149,7 @@ class AppUi(ctx: Context, val model: AppModel, val launch: UiLaunch) {
             model.midi.learn.pick(launch.learnPick ?: "KN1")
         }
         if (launch.openManager) overlay = Overlay.MANAGER
+        if (launch.openReader) overlay = Overlay.READER
         when (launch.page) {
             "diagnostics" -> overlay = Overlay.DIAGNOSTICS
             "bluetooth" -> overlay = Overlay.BLUETOOTH
@@ -152,7 +166,8 @@ class AppUi(ctx: Context, val model: AppModel, val launch: UiLaunch) {
             else -> PanelChip.SEARCHING
         }
 
-    val running: Boolean get() = model.mode == Mode.CORE && model.engineStatus.optInt("booted") != 0
+    // (G, iOS 391497e: no page reads what moves at every 66 ms poll) set by the model only on change
+    val running: Boolean get() = model.coreRunning
 
     fun openSheet(p: SheetPageId? = null) {
         page = p

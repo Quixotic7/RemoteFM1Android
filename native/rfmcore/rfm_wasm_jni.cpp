@@ -64,7 +64,7 @@ jstring utf8(JNIEnv *env, const std::string &s)
 extern "C" {
 
 // {"ok":1, id, name, version, family, license, sha256, folders, abi, flash_size, memory_bytes, file_size, load_us,
-// virtual, uses_folder} or
+// virtual, uses_folder, audio_in (ain1: 0 none, 1 wants, 2 needs)} or
 // {"ok":0, "error": the one-line reason}
 JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_firmware_Rfm1Native_nativeCheck(JNIEnv *env, jclass, jstring path)
 {
@@ -75,8 +75,8 @@ JNIEXPORT jstring JNICALL Java_com_quixotic7_remotefm1_firmware_Rfm1Native_nativ
     if (rfmw_check(p.c_str(), &i, err, sizeof err)) {
         char nums[256];
         std::snprintf(nums, sizeof nums, "\"abi\":%u,\"flash_size\":%u,\"memory_bytes\":%u,\"file_size\":%u,\"load_us\":%u,"
-                      "\"virtual\":%u,\"uses_folder\":%u",
-                      i.abi, i.flash_size, i.memory_bytes, i.file_size, i.load_us, i.is_virtual, i.uses_folder);
+                      "\"virtual\":%u,\"uses_folder\":%u,\"audio_in\":%u",
+                      i.abi, i.flash_size, i.memory_bytes, i.file_size, i.load_us, i.is_virtual, i.uses_folder, i.audio_in);
         j = "{\"ok\":1,\"id\":" + esc(i.id) + ",\"name\":" + esc(i.name) + ",\"version\":" + esc(i.version) +
             ",\"family\":" + esc(i.family) + ",\"license\":" + esc(i.license) + ",\"sha256\":" + esc(i.sha256) + ",\"folders\":" + esc(i.folders) + "," +
             nums + "}";

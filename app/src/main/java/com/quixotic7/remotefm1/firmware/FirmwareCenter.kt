@@ -172,8 +172,10 @@ class FirmwareCenter(
         fun android(ctx: Context): FirmwareCenter {
             val log: (String) -> Unit = { Log.i(TAG, it) }
             val lib = FirmwareLibrary(File(ctx.filesDir, "Firmware"), Rfm1Native, log)
-            val store = FirmwareStore(lib, cacheFile = File(ctx.cacheDir, "Firmware catalog/feeds.json"), tmpDir = ctx.cacheDir, log = log)
-            return FirmwareCenter(lib, store, FirmwareThumbs.android(ctx), File(ctx.filesDir, "cores"), log)
+            val thumbs = FirmwareThumbs.android(ctx)
+            val store = FirmwareStore(lib, cacheFile = File(ctx.cacheDir, "Firmware catalog/feeds.json"), tmpDir = ctx.cacheDir,
+                log = log, thumbs = thumbs)
+            return FirmwareCenter(lib, store, thumbs, File(ctx.filesDir, "cores"), log)
         }
 
         /**
@@ -199,7 +201,7 @@ class FirmwareCenter(
             return OTHER_EXTENSIONS.none { n.endsWith(it) }
         }
 
-        private val OTHER_EXTENSIONS = listOf(".rfm1state", ".syx", ".zip", ".json", ".png", ".jpg", ".pdf", ".txt", ".apk", ".fwsc")
+        private val OTHER_EXTENSIONS = listOf(".rfm1state", ".rfm1transfer", ".syx", ".zip", ".json", ".png", ".jpg", ".pdf", ".txt", ".apk", ".fwsc")
 
         @Suppress("DEPRECATION")
         private fun stream(intent: Intent): Uri? =
