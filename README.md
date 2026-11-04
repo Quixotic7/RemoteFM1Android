@@ -367,11 +367,17 @@ keys, a learned knob turns KN1, the OMX-27 plays the panel, comes back after it 
 | `CorePlayer.swift` (safety copies, checkVersion, wipedCopy, saveState/loadState, currentFlashes) | `app/.../data/DataSafety.kt` (plain functions the player calls) | A5 |
 | Apple's Compression (LZFSE) | `native/lzfse/` (lzfse-1.0, BSD-3) + `data/Lzfse.kt` | A5; byte for byte the same stream |
 | `FlashHistoryTests`, `StateLibraryTests`, `StateFileTests` | `app/src/test/.../data/` (+ `IosCompatTest`: files the iOS code wrote) | A5 |
+| (ca42bbc) `Faceplate/Skin.swift`, `SkinSettings.swift`; `SkinTests` | `ui/theme/Skin.kt`, `SkinImages.kt`, `ui/sheet/SkinSettings.kt`; `app/src/test/.../ui/theme/SkinTest.kt`, `app/src/androidTest/.../SkinDeviceTest.kt` | the photo picker; files/Skins (no App Group) |
 | (edf2039) `MIDI/MidiMap.swift`, `MidiLearn.swift`, `MidiMapStore.swift`, `ControllerInput.swift`; `AUv3/Shared.swift` (AUSettings) | `app/.../midi/` (MidiMap, MidiLearn, MidiMapStore, ControllerInput + MidiParser, MidiSettings) | A6; MidiManager byte streams instead of UMP; one process: listeners instead of Darwin notifications |
 | (edf2039) `OMX27/*.swift` | `app/.../omx/` (OmxWire, OmxViews, OmxScreen, OmxTransport, OmxLink, PanelOmxTarget) | A6; OmxAndroidMidi instead of OmxCoreMIDI (no UMP) |
 | (edf2039) `Faceplate/LearnMode.swift`, `LearnViews.swift`, `Toast.swift`, `MidiSheet.swift`, `PanelFeed.swift` (sources, pickup) | `ui/faceplate/LearnMode.kt`, `LearnViews.kt`, `PanelFeed.kt`, `ui/MidiSheet.kt` | A6 |
 | (edf2039) `Managers/ManagerBridge.swift`, `ManagerPage.swift`; `CorePlayer.swift` (manager*); `App/AppMidi.swift` | `app/.../managers/`, `AppMidi.kt` | A6; WebView, document-start script, `@JavascriptInterface` |
 | (edf2039) `MidiMapTests`, `MidiEngineTests`, `OmxTests`, `PanelMidiTests`, `ManagerTests`, `TouchTests` (settings) | `app/src/test/.../midi/`, `omx/`, `managers/`; `app/src/androidTest/.../midi/MidiEngineTest.kt`, `PanelMidiTest.kt`, `omx/OmxScreenTest.kt`, `MidiDevicesTest.kt`, `managers/ManagerTest.kt` | A6 |
+
+## Thanks
+
+- Brian White, for the idea of skins: a background image behind the faceplate, and firmware with its own look
+  (PLAN.md section 12).
 
 ## Licence
 

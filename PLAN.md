@@ -290,3 +290,22 @@ bd0711a, 41e8471, dfbc827, e527b74):
 - **Menus:** pages read AppModel.coreRunning (set on change), not the 66 ms engine status (the Firmware page
   recomposed 164 times in 12 s, now 0); the audio page's live lines recompose alone. Pickers open where their kind
   last picked from (PickerFolder). The key range snaps to whole keys on release.
+
+## 12. Skins (2026-11-04; iOS 47da48a, ca42bbc)
+
+An image behind the faceplate, like Koala Sampler's backgrounds (ui/theme/Skin.kt, SkinImages.kt,
+ui/sheet/SkinSettings.kt; iOS PLAN.md section 23). Brian White's idea.
+- **The user's:** the sheet's Background section, under Theme: Background image (the photo picker, PickVisualMedia:
+  no storage permission; stored scaled to 2048 px as a JPEG in files/Skins), Dim (0–0.8, default 0.25: the
+  faceplate's colour over the image, so its labels stay legible), Remove. The theme's colours still draw the controls.
+  No AU here, so no App Group copy.
+- **A firmware's:** RemoteFM1IOS docs/RFM1-FORMAT.md section 8 (`rfm1.skin` JSON with dim and colours,
+  `rfm1.skin.background`, `.landscape`; iOS scripts/rfm1_skin.py adds one), read in Kotlin from the file's custom
+  sections. Shown while that firmware plays in the app (mode core), with its colours in place of the theme; it wins
+  over the user's image. Firmware skins (on by default) turns them off. Built-in native cores have none.
+- **Speed:** files are read and images decoded once, on one background thread (ImageDecoder, scaled while decoding,
+  hardware bitmaps); a firmware's skin is cached per file; the image is drawn in a layer of its own. Skins compare by
+  id, dim and colours, so the faceplate is skipped when nothing changed (RecompositionTest: 0 main-screen
+  recompositions in 12 s with a background image).
+- Tests: SkinTest (JVM: sections read back from bytes and from the file, which skin wins, the store, sizes) and
+  SkinDeviceTest (real PNGs, scaling, a skinned file still checks and plays, the JPEG stored, the faceplate's pixels).

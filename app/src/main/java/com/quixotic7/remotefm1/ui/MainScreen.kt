@@ -76,8 +76,9 @@ fun MainScreen(a: AppUi, askNotifications: () -> Unit) {
         }
     }
     Box(Modifier.fillMaxSize()) {
-        FaceplateView(a.feed, ui, a.themes.current, a.chip, a.protector,
-                      onWord = { a.openSheet(SheetPageId.FIRMWARE) }, openSheet = { a.openSheet() })
+        val skin = a.skin                           // (iOS ca42bbc) its colours in place of the theme's
+        FaceplateView(a.feed, ui, skin?.theme ?: a.themes.current, a.chip, a.protector,
+                      onWord = { a.openSheet(SheetPageId.FIRMWARE) }, openSheet = { a.openSheet() }, skin = skin)
         // (A7) the install prompt over the faceplate, as on iOS
         if (!ui.sheetOpen && !ui.editorOpen && !ui.displayAlone && !a.feed.learn.active) {
             val p by a.appFm1.prompter.prompt.collectAsState()

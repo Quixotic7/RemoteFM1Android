@@ -166,6 +166,8 @@ private fun MainSheet(a: AppUi) {
             SheetNote("Double-tap the display to see it alone; double-tap again or swipe down to close.")
             SheetSectionTitle("Theme")
             ThemeSwatches(a.themes) { a.ui.editorOpen = true }
+            SheetSectionTitle("Background")
+            com.quixotic7.remotefm1.ui.sheet.SkinSettings(a.skins, a.pickBackground?.let { p -> { a.skinFailed = false; p() } }, a.skinFailed)
             SheetList(Modifier.padding(top = 20.dp)) {
                 SheetRow("Firmware", value = a.current?.name ?: "–", badge = a.firmware.updates, tag = "row-firmware") { a.page = SheetPageId.FIRMWARE }
                 SheetRow("MIDI & audio", tag = "row-midi") { a.page = SheetPageId.MIDI }

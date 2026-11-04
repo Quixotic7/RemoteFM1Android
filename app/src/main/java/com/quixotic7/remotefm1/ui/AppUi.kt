@@ -95,6 +95,15 @@ class AppUi(ctx: Context, val model: AppModel, val launch: UiLaunch) {
     /** (A6) the MIDI mode page's mapping (its source id) */
     var modeSource by mutableStateOf<String?>(launch.modeSource)
     val themes = ThemeStore(prefs, ThemeStore.tokens(ctx), launch.theme)
+    /** (iOS ca42bbc) skins: the user's background image (files/Skins) and a firmware's own */
+    val skins = com.quixotic7.remotefm1.ui.theme.SkinStore(
+        prefs, java.io.File(ctx.filesDir, "Skins"), com.quixotic7.remotefm1.ui.theme.AndroidSkinDecoder,
+        fileFor = { sha -> model.fw.library.path(sha).takeIf { it.isFile }?.path },
+        background = com.quixotic7.remotefm1.ui.theme.AndroidSkinDecoder.background,
+        post = com.quixotic7.remotefm1.ui.theme.AndroidSkinDecoder.post)
+    /** (MainActivity) the photo picker for the background image; [skinFailed]: the last pick wasn't an image */
+    var pickBackground: (() -> Unit)? = null
+    var skinFailed by mutableStateOf(false)
     val protector = ScreenProtector(prefs)
     var page by mutableStateOf<SheetPageId?>(null)
     var overlay by mutableStateOf<Overlay?>(null)
@@ -158,6 +167,18 @@ class AppUi(ctx: Context, val model: AppModel, val launch: UiLaunch) {
     }
 
     val current: FirmwareEntry? get() = firmware.entries.firstOrNull { it.id == model.selected }
+
+    /** (iOS ca42bbc) the image behind the faceplate: the playing firmware's own skin, else the user's background */
+    val skin: com.quixotic7.remotefm1.ui.theme.Skin?
+        get() = skins.skin(if (model.mode == Mode.CORE) model.selected else null)
+
+    /** (the photo picker's result) read and stored off the main thread */
+    fun backgroundPicked(read: () -> ByteArray?) {
+        com.quixotic7.remotefm1.ui.theme.AndroidSkinDecoder.background {
+            val ok = runCatching { read()?.let { skins.setImage(it) } }.getOrNull() ?: false
+            com.quixotic7.remotefm1.ui.theme.AndroidSkinDecoder.post { skinFailed = !ok }
+        }
+    }
 
     val chip: PanelChip
         get() = if (model.source != Source.FM1) PanelChip.EMULATOR else when (model.state) {

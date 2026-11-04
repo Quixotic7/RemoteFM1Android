@@ -65,6 +65,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.quixotic7.remotefm1.ui.theme.Palette
 import com.quixotic7.remotefm1.ui.theme.RfmFonts
+import com.quixotic7.remotefm1.ui.theme.Skin
+import com.quixotic7.remotefm1.ui.theme.SkinBackground
 import com.quixotic7.remotefm1.ui.theme.Theme
 import com.quixotic7.remotefm1.ui.theme.color
 import kotlin.math.abs
@@ -72,12 +74,13 @@ import kotlin.math.max
 
 /**
  * The faceplate filling its space. [kind]: null picks the layout from the size. [chrome]: the status row / grabber
- * and the page dots. [poll]: this one polls the feed (the theme editor's preview doesn't).
+ * and the page dots. [poll]: this one polls the feed (the theme editor's preview doesn't). [skin]: an image behind it
+ * (SkinStore; iOS ca42bbc).
  */
 @Composable
 fun FaceplateView(feed: PanelFeed, ui: FaceplateUi, theme: Theme, chip: PanelChip, protector: ScreenProtector,
                   modifier: Modifier = Modifier, kind: FaceplateLayout.Kind? = null, chrome: Boolean = true,
-                  poll: Boolean = true, onWord: (() -> Unit)? = null, openSheet: () -> Unit = {}) {
+                  poll: Boolean = true, onWord: (() -> Unit)? = null, openSheet: () -> Unit = {}, skin: Skin? = null) {
     if (poll) {
         LaunchedEffect(feed) {
             try {
@@ -91,6 +94,7 @@ fun FaceplateView(feed: PanelFeed, ui: FaceplateUi, theme: Theme, chip: PanelChi
         val w = maxWidth.value
         val h = maxHeight.value
         val k = kind ?: FaceplateLayout.Kind.pick(w, h)
+        if (skin != null) SkinBackground(skin, theme.body.color, wide = w > h)
         // the background: sideways swipes change the view (controls on top take their own touches)
         Box(Modifier.fillMaxSize().swipe { ui.move(it) })
         Crossfade(ui.page, animationSpec = tween(250), label = "page") { page ->

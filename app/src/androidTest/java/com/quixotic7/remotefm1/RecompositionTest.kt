@@ -30,7 +30,25 @@ class RecompositionTest {
         }
     }
 
-    @Test fun firmwarePageIsQuietWhileTheStatusIsPolled() {
+    @Test fun firmwarePageIsQuietWhileTheStatusIsPolled() = quiet()
+
+    /** (iOS ca42bbc) the same with a background image behind the faceplate */
+    @Test fun aSkinnedFaceplateIsQuietToo() {
+        val a = (rule.activity as MainActivity).appUi
+        val b = android.graphics.Bitmap.createBitmap(600, 900, android.graphics.Bitmap.Config.ARGB_8888)
+        android.graphics.Canvas(b).drawColor(0xFF3366E6.toInt())
+        val png = java.io.ByteArrayOutputStream().use { b.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it); it.toByteArray() }
+        assertTrue(a.skins.setImage(png))
+        try {
+            run(500)
+            assertTrue("the image is shown", a.skin != null)
+            quiet()
+        } finally {
+            rule.runOnUiThread { a.skins.removeImage() }
+        }
+    }
+
+    private fun quiet() {
         rule.runOnUiThread {
             if (m.source != Source.TABLET) m.useSource(Source.TABLET)
             if (m.selected != "fizz") m.select("fizz")

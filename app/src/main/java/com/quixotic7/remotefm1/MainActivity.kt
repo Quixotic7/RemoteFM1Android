@@ -64,6 +64,10 @@ class MainActivity : ComponentActivity() {
         AppUi.PICK_CART -> PickerFolder.CART
         else -> PickerFolder.FIRMWARE
     }
+    // (iOS ca42bbc) the background image: the photo picker (no storage permission)
+    private val photo = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { u ->
+        if (u != null) appUi.backgroundPicked { contentResolver.openInputStream(u)?.use { it.readBytes() } }
+    }
     private val folder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u ->
         if (u != null) appUi.appData.folderPicked(DataFolder.set(this, u))
     }
@@ -85,6 +89,9 @@ class MainActivity : ComponentActivity() {
             pick.launch(if (kind == AppUi.PICK_BACKUP) arrayOf("application/zip", "application/octet-stream", StateFile.MIME, "*/*") else arrayOf("*/*"))
         }
         appUi.pickFolder = { folder.launch(null) }
+        appUi.pickBackground = {
+            photo.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        }
         appUi.share = { f, mime -> shareFile(f, mime) }
         com.quixotic7.remotefm1.managers.ManagerBridge.picker = { multiple, done ->
             editorPicked?.invoke(emptyList())
