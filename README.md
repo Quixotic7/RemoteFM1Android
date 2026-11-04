@@ -29,11 +29,11 @@ audio doesn't work and can make the FM-1 drop off USB; play through the phone's 
 
 Check the download (optional): its SHA-256 is in the release notes and in `RemoteFM1-<version>.apk.sha256`:
 
-    shasum -a 256 RemoteFM1-0.1.0.apk                       # macOS / Linux; Windows: certutil -hashfile <file> SHA256
+    shasum -a 256 RemoteFM1-0.2.0.apk                       # macOS / Linux; Windows: certutil -hashfile <file> SHA256
 
 and the signing certificate, with the Android SDK's build-tools:
 
-    apksigner verify --print-certs RemoteFM1-0.1.0.apk
+    apksigner verify --print-certs RemoteFM1-0.2.0.apk
 
 must show `Signer #1 certificate SHA-256 digest: 6fd9956c1ce876619e710ebb33ef44a5d72cf6968ca29b278613938b6a1799cb`.
 An APK with another certificate is not from me.
