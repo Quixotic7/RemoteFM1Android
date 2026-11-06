@@ -369,6 +369,14 @@ class FirmwareStoreTest {
         assertEquals("ab", v["amb"]?.first()?.sha256)
         assertEquals(Instant.parse("2026-11-01T20:00:00Z"), v["choralroot"]?.first()?.released)
         assertEquals("the first release with that version", Instant.parse("2026-10-20T10:00:00Z"), v["amb"]?.first()?.released)
+        // the rolling release `current` (newest, holding every current file) leaves the dates alone
+        val withCurrent = "[" + release("current", "2026-11-06T23:00:00Z", listOf("choralroot-0.29.rfm1", "amb-1.3.rfm1")) + "," + list.drop(1)
+        val vc = FeedSnapshot.versions(withCurrent.toByteArray(), "test")
+        assertEquals(Instant.parse("2026-11-01T20:00:00Z"), vc["choralroot"]?.first()?.released)
+        assertEquals("https://github.com/x/c/amb-1.3.rfm1", vc["amb"]?.first()?.downloads?.first()?.url)
+        // and the latest feed's release (the catalog images' key) is current's dated name, not "current"
+        val latest = """{"tag_name":"current","name":"2026-11-06e","assets":[]}"""
+        assertEquals("2026-11-06e", FeedSnapshot.parse(latest.toByteArray(), FirmwareFeed.RELEASES).release)
         // (survives the cache)
         val back = AvailableFirmware.fromMap(MiniJson.parse(MiniJson.write(v["amb"]!!.first().toMap())).obj())
         assertEquals(v["amb"]!!.first().released, back?.released)

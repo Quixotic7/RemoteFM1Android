@@ -260,7 +260,11 @@ data class FeedSnapshot(
                         list.add(AvailableFirmware(id, version = version, downloads = listOf(AvailableFirmware.Download(dl, feed.name,
                             if (digest.startsWith("sha256:")) digest.drop(7).lowercase() else "", size ?: 0, name))))
                     }
-                    FeedSnapshot(feed, fetched, list, release = runCatching { root.optStr("tag_name") }.getOrNull())
+                    // (the rolling release `current`, updated in place since 2026-11-06, carries the dated tag in its name:
+                    // that is what changes with each publish, so the catalog images key on it)
+                    val tag = runCatching { root.optStr("tag_name") }.getOrNull()
+                    val release = if (tag == "current") runCatching { root.optStr("name") }.getOrNull() ?: tag else tag
+                    FeedSnapshot(feed, fetched, list, release = release)
                 }
                 FirmwareFeed.Kind.CATALOG -> {
                     val items = root["firmwares"].obj() ?: throw ParseError()
@@ -295,6 +299,8 @@ data class FeedSnapshot(
             for (item in list) {
                 val r = item.obj() ?: continue
                 if (r.bool("draft") == true) continue
+                // (the rolling release holds every current file; each is also in its dated release, whose date counts)
+                if (r.str("tag_name") == "current") continue
                 val published = r.str("published_at")?.let { runCatching { Instant.parse(it) }.getOrNull() }
                 val assets = r["assets"].arr() ?: continue
                 for (a in assets) {
