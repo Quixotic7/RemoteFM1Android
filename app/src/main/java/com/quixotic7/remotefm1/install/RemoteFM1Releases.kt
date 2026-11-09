@@ -29,7 +29,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** a RemoteFM1 version: major.minor.patch */
 data class RemoteFM1Version(val major: Int, val minor: Int, val patch: Int) : Comparable<RemoteFM1Version> {
     /** the identity a release with this version installs as */
-    val identity: String get() = IDENTITY_PREFIX + "%02d%02d%02d".format(major, minor, patch)
+    val identity: String get() =
+        (if (this >= FIRST_72) IDENTITY_PREFIX else LEGACY_PREFIX) + "%02d%02d%02d".format(major, minor, patch)
 
     override fun toString() = "$major.$minor.$patch"
 
@@ -37,7 +38,17 @@ data class RemoteFM1Version(val major: Int, val minor: Int, val patch: Int) : Co
         compareValuesBy(this, other, { it.major }, { it.minor }, { it.patch })
 
     companion object {
-        const val IDENTITY_PREFIX = "FM-1_52"
+        /** RemoteFM1's identity from 0.3.7: FM-1_72XXYYZZ, the dev build FM-1_7200 (QUADRO also uses FM-1_52, and
+         *  its 1.x is FM-1_5201xxxx, so RemoteFM1 1.0 would have collided) */
+        const val IDENTITY_PREFIX = "FM-1_72"
+        /** 0.2.0 to 0.3.6: FM-1_52XXYYZZ, the dev build FM-1_5200 */
+        const val LEGACY_PREFIX = "FM-1_52"
+        val PREFIXES = listOf(IDENTITY_PREFIX, LEGACY_PREFIX)
+        /** the first release with the FM-1_72 identity */
+        val FIRST_72 = RemoteFM1Version(0, 3, 7)
+
+        /** a RemoteFM1 development build's identity (FM-1_7200 or FM-1_5200) */
+        fun isDevBuild(identity: String) = PREFIXES.any { identity == it + "00" }
 
         /** the oldest RemoteFM1 this app's link speaks */
         val appMinimum = RemoteFM1Version(0, 2, 2)
@@ -52,10 +63,11 @@ data class RemoteFM1Version(val major: Int, val minor: Int, val patch: Int) : Co
             return RemoteFM1Version(parts[0]!!, parts[1]!!, if (parts.size > 2) parts[2]!! else 0)
         }
 
-        /** FM-1_52XXYYZZ is XX.YY.ZZ; null for anything else (a dev build's FM-1_5200, 0.1.x's FM-1_015) */
+        /** FM-1_72XXYYZZ or FM-1_52XXYYZZ is XX.YY.ZZ; null for anything else (a dev build's FM-1_7200 / FM-1_5200,
+         *  0.1.x's FM-1_015) */
         fun ofIdentity(identity: String): RemoteFM1Version? {
-            if (!identity.startsWith(IDENTITY_PREFIX)) return null
-            val digits = identity.drop(IDENTITY_PREFIX.length)
+            val prefix = PREFIXES.firstOrNull { identity.startsWith(it) } ?: return null
+            val digits = identity.drop(prefix.length)
             if (digits.length != 6 || !digits.all { it in '0'..'9' }) return null
             val n = digits.toInt()
             return RemoteFM1Version(n / 10000, (n / 100) % 100, n % 100)

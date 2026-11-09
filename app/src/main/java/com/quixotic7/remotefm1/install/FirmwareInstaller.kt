@@ -92,7 +92,7 @@ data class InstallSummary(
         fun nameOf(identity: String): String {
             RemoteFM1Version.ofIdentity(identity)?.let { return "RemoteFM1 $it" }
             if (identity == "FM-1_015") return "M-VAVE V15 (or RemoteFM1 0.1)"
-            if (identity == RemoteFM1Version.IDENTITY_PREFIX + "00") return "a RemoteFM1 development build"
+            if (RemoteFM1Version.isDevBuild(identity)) return "a RemoteFM1 development build"
             FM1Identity.parse(identity)?.let {
                 if (it.isLoader) return "its update loader (part-way through an update)"
                 if (it.isOpenFirmware) return "M-VAVE's open firmware"
