@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // JNI for the Ableton Move (rfmm_*, include/RFMMove.h, the API RemoteFM1IOS ad33e95 has; MoveLink.cpp and
-// rfm1cs-abletonmove's session under it):
+// rfm1cs-abletonmove's session under it), and its project file (store.h rfm1cs_file_*):
 // move/MoveNative.kt. A handle is an rfmm_t pointer; requests and audio are copied out per call.
 #include <jni.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 
 #include "RFMMove.h"
+#include "rfm1cs/store.h"
 
 namespace {
 rfmm_t *mv(jlong h) { return reinterpret_cast<rfmm_t *>(h); }
@@ -110,6 +112,69 @@ JNIEXPORT jbyteArray JNICALL F(nativeWithColor)(JNIEnv *env, jclass, jbyteArray 
 }
 JNIEXPORT jint JNICALL F(nativeProjectMax)(JNIEnv *, jclass) { return (jint)rfmm_project_max(); }
 
+// ---- the project file (.rfmmove / .rfmmoveset, "RMVP"): rfm1cs-abletonmove's, as the web player and iOS write it
+// entries: slots[i], saved[i] (Unix seconds, 0 unknown), blobs[i]; kind 0: one project for one entry, else a set. The
+// file, or null (more than 32 entries, a slot out of range)
+JNIEXPORT jbyteArray JNICALL F(nativeFilePack)(JNIEnv *env, jclass, jintArray slots, jintArray saved, jobjectArray blobs,
+                                               jint kind)
+{
+    const jsize n = env->GetArrayLength(blobs);
+    if (n > RFM1CS_SLOTS || env->GetArrayLength(slots) < n || env->GetArrayLength(saved) < n)
+        return nullptr;
+    std::vector<std::vector<uint8_t>> keep((size_t)n);
+    rfm1cs_file_entry_t e[RFM1CS_SLOTS];
+    jint sl[RFM1CS_SLOTS], sv[RFM1CS_SLOTS];
+    env->GetIntArrayRegion(slots, 0, n, sl);
+    env->GetIntArrayRegion(saved, 0, n, sv);
+    for (jsize i = 0; i < n; i++) {
+        jbyteArray b = (jbyteArray)env->GetObjectArrayElement(blobs, i);
+        keep[(size_t)i] = bytes(env, b);
+        env->DeleteLocalRef(b);
+        if (sl[i] < 0 || sl[i] >= RFM1CS_SLOTS)
+            return nullptr;
+        e[i] = rfm1cs_file_entry_t{sl[i], (uint32_t)sv[i], ptr(keep[(size_t)i]), (uint32_t)keep[(size_t)i].size()};
+    }
+    std::vector<uint8_t> out(rfm1cs_file_size(e, n));
+    const uint32_t len = rfm1cs_file_pack(e, n, kind, out.data(), (uint32_t)out.size());
+    if (!len)
+        return nullptr;
+    jbyteArray a = env->NewByteArray((jsize)len);
+    env->SetByteArrayRegion(a, 0, (jsize)len, reinterpret_cast<const jbyte *>(out.data()));
+    return a;
+}
+
+// a file read, every blob checked (rfm_move_project_check): its blobs, with meta[0] the kind and meta[1 + 2i],
+// meta[2 + 2i] entry i's slot and saved (Unix seconds); or null with why[0] what is wrong ("Not a Move project file:
+// ...", in the web player's words, "this app")
+JNIEXPORT jobjectArray JNICALL F(nativeFileUnpack)(JNIEnv *env, jclass, jbyteArray file, jintArray meta,
+                                                   jobjectArray why)
+{
+    const std::vector<uint8_t> f = bytes(env, file);
+    rfm1cs_file_entry_t e[RFM1CS_SLOTS];
+    rfm1cs_file_error_t err;
+    int kind = 0;
+    const int n = file ? rfm1cs_file_unpack(ptr(f), (uint32_t)f.size(), &kind, e, &err)
+                       : rfm1cs_file_unpack(nullptr, 0, &kind, e, &err);
+    if (n < 0) {
+        char t[200];
+        rfm1cs_file_error_text(&err, "app", t, sizeof t);
+        if (why && env->GetArrayLength(why) > 0)
+            env->SetObjectArrayElement(why, 0, env->NewStringUTF(t));
+        return nullptr;
+    }
+    jint m[1 + 2 * RFM1CS_SLOTS] = {kind};
+    for (int i = 0; i < n; i++)
+        m[1 + 2 * i] = e[i].slot, m[2 + 2 * i] = (jint)e[i].saved;
+    env->SetIntArrayRegion(meta, 0, std::min<jsize>(1 + 2 * n, env->GetArrayLength(meta)), m);
+    jobjectArray out = env->NewObjectArray(n, env->FindClass("[B"), nullptr);
+    for (int i = 0; i < n; i++) {
+        jbyteArray a = env->NewByteArray((jsize)e[i].len);
+        env->SetByteArrayRegion(a, 0, (jsize)e[i].len, reinterpret_cast<const jbyte *>(e[i].bytes));
+        env->SetObjectArrayElement(out, i, a);
+        env->DeleteLocalRef(a);
+    }
+    return out;
+}
 JNIEXPORT jbyteArray JNICALL F(nativeTestEmptyProject)(JNIEnv *env, jclass)
 {
     std::vector<uint8_t> b(rfmm_project_max());

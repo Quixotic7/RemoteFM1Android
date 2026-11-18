@@ -251,13 +251,13 @@ class MoveLink(
         val pick = if (slot == null) all else all.filter { it.slot == slot }
         if (pick.isEmpty()) return null
         return (if (slot == null) MoveProjects.SET_NAME else MoveProjects.fileName(slot)) to
-            MoveProjects.packFile(pick, if (slot == null) MoveProjects.KIND_SET else MoveProjects.KIND_ONE)
+            projects.codec.pack(pick, if (slot == null) MoveProjects.KIND_SET else MoveProjects.KIND_ONE)
     }
 
     /** Import a file: a single project into [slot] (or the first free one: -1), a set into its own slots; checked by
      *  the core first, nothing stored unless all are good. Returns the slots written; throws saying why not */
     fun importFile(bytes: ByteArray, slot: Int = -1): List<Int> {
-        val f = MoveProjects.unpackFile(bytes) { MoveNative.projectCheck(it) }
+        val f = projects.codec.unpack(bytes)
         var todo = f.entries
         if (f.kind == MoveProjects.KIND_ONE) {
             val to = if (MoveProjects.validSlot(slot)) slot else MoveProjects.firstFree(projects.dirBits())

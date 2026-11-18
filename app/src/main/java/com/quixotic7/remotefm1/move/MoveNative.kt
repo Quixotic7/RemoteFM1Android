@@ -59,6 +59,28 @@ object MoveNative {
     const val TONE_ON = 2
     const val TONE_BAD = 3
 
+    /** the project file (.rfmmove / .rfmmoveset, "RMVP") by rfm1cs-abletonmove's store.c: the web player's and the
+     *  iPhone app's format, byte for byte as Android's own Kotlin wrote it before */
+    object FileCodec : MoveFileCodec {
+        override fun pack(ps: List<MoveProject>, kind: Int): ByteArray =
+            nativeFilePack(IntArray(ps.size) { ps[it].slot },
+                IntArray(ps.size) { val t = ps[it].saved; if (t > 0) (t / 1000).toInt() else 0 },
+                Array(ps.size) { ps[it].bytes }, kind)
+                ?: throw IllegalArgumentException("Can't write a Move project file of ${ps.size} projects.")
+
+        override fun unpack(bytes: ByteArray?): MoveProjects.Unpacked {
+            val meta = IntArray(1 + 2 * MoveProjects.SLOTS)
+            val why = arrayOfNulls<String>(1)
+            val blobs = nativeFileUnpack(bytes, meta, why)
+                ?: throw IllegalArgumentException(why[0] ?: "Not a Move project file.")
+            val now = System.currentTimeMillis()
+            return MoveProjects.Unpacked(meta[0], blobs.mapIndexed { i, b ->
+                val t = meta[2 + 2 * i].toLong() and 0xFFFFFFFFL
+                MoveProject(meta[1 + 2 * i], b, if (t > 0) t * 1000 else now)
+            })
+        }
+    }
+
     fun create(settings: ByteArray?): Long = nativeNew(settings)
     fun free(h: Long) = nativeFree(h)
     /** connects (and again while wanted); host: "address", "address:port" or "[v6]:port" (rfm1cs_tcp_connect's);
@@ -106,6 +128,8 @@ object MoveNative {
     @JvmStatic private external fun nativeProjectCheck(blob: ByteArray): Int
     @JvmStatic private external fun nativeWithColor(blob: ByteArray, color: Int): ByteArray
     @JvmStatic private external fun nativeProjectMax(): Int
+    @JvmStatic private external fun nativeFilePack(slots: IntArray, saved: IntArray, blobs: Array<ByteArray>, kind: Int): ByteArray?
+    @JvmStatic private external fun nativeFileUnpack(file: ByteArray?, meta: IntArray, why: Array<String?>): Array<ByteArray>?
     @JvmStatic private external fun nativeTestEmptyProject(): ByteArray?
     @JvmStatic private external fun nativeTakeAudio(h: Long, stereo: ShortArray): Int
     @JvmStatic private external fun nativeTestInput(h: Long, packet: Int)

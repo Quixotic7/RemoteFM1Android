@@ -115,7 +115,7 @@ class AppMidi(ctx: Context, private val engine: RfmEngine, private val link: Rfm
         val m = com.quixotic7.remotefm1.move.MoveLink(
             attach = { engine.moveAttach(it) },
             settings = com.quixotic7.remotefm1.move.MoveSettings(p),
-            projects = com.quixotic7.remotefm1.move.MoveProjects(dir) { com.quixotic7.remotefm1.move.MoveNative.projectCheck(it) },
+            projects = com.quixotic7.remotefm1.move.MoveProjects(dir, com.quixotic7.remotefm1.move.MoveNative.FileCodec),
             takes = com.quixotic7.remotefm1.move.MoveTakes(java.io.File(dir, "takes")),
             mdns = mdns,
             main = { f -> handler.post(f) },
