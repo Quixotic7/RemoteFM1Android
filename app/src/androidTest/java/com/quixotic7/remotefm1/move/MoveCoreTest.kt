@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
-// The Ableton Move's core on the engine (native/rfmcore/MoveLink.cpp through rfmm_* and move_jni.cpp), without a
-// network: the network thread's side is the tests' (rfmm_test_*), the firmware the echo core (its MIDI in back out).
+// The Ableton Move's core on the engine (native/rfmcore/MoveLink.cpp on rfm1cs-abletonmove's session, through rfmm_*
+// and move_jni.cpp), without a network: a fake Move in place of the socket (rfmm_test_*: it answers the session's HELLO
+// and sends a STATUS every 500 ms), the firmware the echo core (its MIDI in back out).
 // Input to actions (a pad plays an FM-1 key with its velocity, a button by label, a knob a detent every two ticks,
 // a Track tap changes the mode), the LEDs and the screen out, the sequencer's notes into the firmware on the beat (the
 // caller's device clock, and the audio clock's frames through the render-ahead ring), the metronome mixed into the
-// output, Sample's take cut on bar lines, and the projects' requests answered.
+// output, Sample's take cut on bar lines, the projects' requests answered, a lost link tried again.
 package com.quixotic7.remotefm1.move
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -15,6 +16,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import android.os.SystemClock
 import org.junit.Test
 import org.junit.runner.RunWith
 import kotlin.math.abs
@@ -46,7 +48,18 @@ class MoveCoreTest {
         e.moveAttach(h)
         MoveNative.testConnected(h, true)
         step(5)
+        await("connected") { MoveNative.status(h).state == MoveNative.CONNECTED }
         return e
+    }
+
+    /** the device clock a millisecond at a time (with the wall clock's: the session's timers) until [ok] */
+    private fun await(what: String, ms: Long = 3000, ok: () -> Boolean) {
+        val end = SystemClock.elapsedRealtime() + ms
+        while (!ok()) {
+            assertTrue("waited for $what", SystemClock.elapsedRealtime() < end)
+            step(1)
+            SystemClock.sleep(1)
+        }
     }
 
     private var audio = false
@@ -119,16 +132,60 @@ class MoveCoreTest {
         tap(40)                                          // Track 4: the sequencer, its screen named
         step(40)
         assertEquals(3, MoveNative.status(h).mode)
-        assertTrue(MoveNative.testTakeScreen(h, shot))
+        await("the Sequencer's screen (33 ms on the wall clock)") { MoveNative.testTakeScreen(h, shot) }
         // a lost link lets go of everything; a new one paints every LED again
         press(MoveNative.note(86, 100))
         step(12)
         MoveNative.testConnected(h, false)
         step(12)
         assertEquals(0, keys())
+        assertEquals(MoveNative.RETRYING, MoveNative.status(h).state)
         MoveNative.testConnected(h, true)
         step(20)
+        await("connected again") { MoveNative.status(h).state == MoveNative.CONNECTED }
         assertTrue(leds().size >= 48)
+    }
+
+    /** the link cut: lost (everything let go, the project saved), RETRYING, then connected again by itself after 1 s */
+    @Test fun aLostLinkIsTriedAgain() {
+        setup()
+        val empty = MoveNative.testEmptyProject()!!
+        MoveNative.projectsInit(h, 1, 0, empty)
+        tap(40); step(5); stepTap(0); step(5)           // a step entered: the project changed
+        drainRequests()
+        assertEquals(1, MoveNative.status(h).connects)
+        MoveNative.testConnected(h, false)
+        step(5)
+        val st = MoveNative.status(h)
+        assertEquals(MoveNative.RETRYING, st.state)
+        assertTrue("the text: ${st.text}", st.text.startsWith("Link lost"))
+        assertTrue("flushed on lost", drainRequests().any { it[0] == MoveNative.REQ_PROJECT_SAVE })
+        val t0 = SystemClock.elapsedRealtime()
+        await("the retry", 4000) { MoveNative.status(h).state == MoveNative.CONNECTED }
+        assertTrue("after ~1 s", SystemClock.elapsedRealtime() - t0 >= 800)
+        assertEquals(2, MoveNative.status(h).connects)
+        assertEquals("Sequencer mode kept", 3, MoveNative.status(h).mode)
+        assertTrue("every LED again", leds().size >= 48)
+    }
+
+    /** PROJECT_LOAD answered with a blob that is not a project: an empty project there (Android's behaviour) */
+    @Test fun anInvalidProjectLoadsEmpty() {
+        setup()
+        val empty = MoveNative.testEmptyProject()!!
+        MoveNative.projectsInit(h, 1, 0, empty)
+        step(5)
+        assertEquals(0, MoveNative.status(h).project)
+        MoveNative.projectAnswer(h, 3, byteArrayOf(1, 2, 3, 4, 5))
+        step(5)
+        await("the slot") { MoveNative.status(h).project == 3 }
+    }
+
+    private fun drainRequests(): List<IntArray> {
+        val out = IntArray(4)
+        val data = ByteArray(MoveNative.projectMax)
+        val reqs = ArrayList<IntArray>()
+        while (MoveNative.takeRequest(h, out, data) >= 0) reqs += out.copyOf()
+        return reqs
     }
 
     /** Track 4, steps 1 and 5 tapped (the root), Play: the notes into the firmware 500 ms apart at 120 BPM */

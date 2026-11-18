@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // End to end against Move Remote's simulator (abletonmoveremote's moveremote-sim, on the Mac: the emulator reaches it at
-// 10.0.2.2), over the real network thread: scripts/move_e2e.sh starts the simulator, runs this with
+// 10.0.2.2), over the real socket thread and rfm1cs-abletonmove's session: scripts/move_e2e.sh starts the simulator, runs this with
 // `-e moveSim 10.0.2.2:<port>`, waits for the link, then presses through the simulator's test FIFO: a pad (an FM-1
 // key), Track 4, steps 1 and 5, Play. This side checks the key played, the LEDs and screens went out, the mode, and
-// the sequencer's notes reached the firmware (the echo core) on the beat. Skipped without the argument.
+// the sequencer's notes reached the firmware (the echo core) on the beat; then the socket is cut and the session
+// connects again by itself. Skipped without the argument.
 package com.quixotic7.remotefm1.move
 
 import android.os.SystemClock
@@ -74,6 +75,23 @@ class MoveE2eTest {
             assertTrue("note-ons $ons", ons.size >= 3)
             assertTrue("step 5 after step 1: ${ons[1] - ons[0]} ms", kotlin.math.abs(ons[1] - ons[0] - 500) <= 2)
             assertTrue("the bar: ${ons[2] - ons[0]} ms", kotlin.math.abs(ons[2] - ons[0] - 2000) <= 2)
+            // the socket cut under the session: lost, RETRYING, connected again by itself (~1 s)
+            MoveNative.testDrop(h)
+            var retrying = false
+            val back = SystemClock.elapsedRealtime() + 10_000
+            while (SystemClock.elapsedRealtime() < back) {
+                val now = SystemClock.elapsedRealtime()
+                if (now > last) { e.run((now - last).toInt()); last = now }
+                val s2 = MoveNative.status(h)
+                if (s2.state == MoveNative.RETRYING) retrying = true
+                if (retrying && s2.state == MoveNative.CONNECTED) break
+                SystemClock.sleep(2)
+            }
+            val s3 = MoveNative.status(h)
+            Log.i("RFMMoveE2e", "after the cut: state ${s3.state} '${s3.text}' connects ${s3.connects}")
+            assertTrue("lost after the cut", retrying)
+            assertEquals("connected again", MoveNative.CONNECTED, s3.state)
+            assertEquals(2, s3.connects)
         } finally {
             MoveNative.stop(h)
             e.moveAttach(0)
