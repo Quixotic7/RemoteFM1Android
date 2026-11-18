@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
-// JNI for the Ableton Move (rfmm_*, include/RFMMove.h, the API RemoteFM1IOS ad33e95 has; MoveLink.cpp under it):
+// JNI for the Ableton Move (rfmm_*, include/RFMMove.h, the API RemoteFM1IOS ad33e95 has; MoveLink.cpp and
+// rfm1cs-abletonmove's session under it):
 // move/MoveNative.kt. A handle is an rfmm_t pointer; requests and audio are copied out per call.
 #include <jni.h>
 
@@ -131,6 +132,7 @@ JNIEXPORT jint JNICALL F(nativeTakeAudio)(JNIEnv *env, jclass, jlong h, jshortAr
 // ---- tests without a network
 JNIEXPORT void JNICALL F(nativeTestInput)(JNIEnv *, jclass, jlong h, jint packet) { rfmm_test_input(mv(h), (uint32_t)packet); }
 JNIEXPORT void JNICALL F(nativeTestConnected)(JNIEnv *, jclass, jlong h, jboolean up) { rfmm_test_connected(mv(h), up ? 1 : 0); }
+JNIEXPORT void JNICALL F(nativeTestDrop)(JNIEnv *, jclass, jlong h) { rfmm_test_drop(mv(h)); }
 JNIEXPORT jint JNICALL F(nativeTestTakeLeds)(JNIEnv *env, jclass, jlong h, jbyteArray out)
 {
     const jsize max = env->GetArrayLength(out) / 6;

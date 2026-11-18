@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // The Ableton Move's JNI (native/rfmcore/move_jni.cpp over rfmm_*, include/RFMMove.h: RemoteFM1IOS ad33e95's API, with
-// Android's Sample queue and test entries). A handle is an rfmm_t pointer: the core (on the engine's core thread once
-// RfmEngine.moveAttach has it), the network thread, and the requests the app answers.
+// Android's Sample queue and test entries). A handle is an rfmm_t pointer: rfm1cs-abletonmove's session and core (on
+// the engine's core thread once RfmEngine.moveAttach has it), the socket's thread, and the requests the app answers.
 package com.quixotic7.remotefm1.move
 
 object MoveNative {
     init { System.loadLibrary("rfmcore") }
 
-    // RFMMove.h RFMM_* (states) and RFMM_REQ_* (requests)
+    // RFMMove.h RFMM_* (states: the session's RFM1CS_*) and RFMM_REQ_* (requests)
     const val OFF = 0
     const val CONNECTING = 1
     const val CONNECTED = 2
     const val RETRYING = 3
-    const val ERROR = 4
+    const val FAILED = 4                    // it gave up (another protocol version)
+    const val ERROR = FAILED
     const val REQ_SETTINGS = 7
     const val REQ_PROJECT_SAVE = 8
     const val REQ_PROJECT_LOAD = 9
@@ -29,7 +30,7 @@ object MoveNative {
 
     class Status(v: IntArray, nameText: String) {
         val state = v[0]
-        val via = v[1]                      // MR_VIA_*: 0 Wi-Fi, 1 USB, 2 this computer; -1 none
+        val via = v[1]                      // MR_VIA_*: 0 Wi-Fi, 1 USB, 2 this computer; -1 never connected
         val battery = v[2]
         val mode = v[3]
         val project = v[4]
@@ -65,9 +66,11 @@ object MoveNative {
     fun testEmptyProject(): ByteArray? = nativeTestEmptyProject()
     fun takeAudio(h: Long, stereo: ShortArray): Int = nativeTakeAudio(h, stereo)
 
-    // tests: the network thread's side without a network
+    // tests: a fake Move in place of the socket (it answers HELLO and sends a STATUS every 500 ms); down: the link cut
+    // (lost, tried again in 1 s); testDrop: the real socket cut
     fun testInput(h: Long, packet: Int) = nativeTestInput(h, packet)
     fun testConnected(h: Long, up: Boolean) = nativeTestConnected(h, up)
+    fun testDrop(h: Long) = nativeTestDrop(h)
     fun testTakeLeds(h: Long, out: ByteArray): Int = nativeTestTakeLeds(h, out)
     fun testTakeScreen(h: Long, out: ByteArray): Boolean = nativeTestTakeScreen(h, out)
 
@@ -93,6 +96,7 @@ object MoveNative {
     @JvmStatic private external fun nativeTakeAudio(h: Long, stereo: ShortArray): Int
     @JvmStatic private external fun nativeTestInput(h: Long, packet: Int)
     @JvmStatic private external fun nativeTestConnected(h: Long, up: Boolean)
+    @JvmStatic private external fun nativeTestDrop(h: Long)
     @JvmStatic private external fun nativeTestTakeLeds(h: Long, out: ByteArray): Int
     @JvmStatic private external fun nativeTestTakeScreen(h: Long, out: ByteArray): Boolean
 }

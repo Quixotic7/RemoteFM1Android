@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // Connect my Ableton Move: a Move running Move Remote (github.com/Quixotic7/abletonmoveremote) as the FM-1's controller.
-// The C++ (native/rfmcore/MoveLink.cpp, ported from RemoteFM1IOS ad33e95) runs RemoteFM1's rfm_move core on the
-// engine's core thread and Move Remote's client on its own network thread (connecting again while wanted); this class
+// The C++ (native/rfmcore/MoveLink.cpp) runs rfm1cs-abletonmove's session and its rfm_move core on the engine's core
+// thread and the socket on its own thread (the session connects again while wanted: 1, 2, 4 s); this class
 // is the app's side, as iOS's MoveController and the web player's MoveLink (RemoteFM1 18c6a82 web/site/js/move-link.js):
 //   - Connect / Disconnect, the address (move.local asked of the network itself: MoveMdns), connecting by itself at
 //     the next start (moveAuto), the status for the page
@@ -170,7 +170,7 @@ class MoveLink(
         val t = when (st.state) {
             MoveNative.CONNECTED -> Tone.ON
             MoveNative.CONNECTING, MoveNative.RETRYING -> Tone.BUSY
-            MoveNative.ERROR -> Tone.BAD
+            MoveNative.FAILED -> Tone.BAD
             else -> Tone.OFF
         }
         val mode = MODES.getOrElse(st.mode) { "" }

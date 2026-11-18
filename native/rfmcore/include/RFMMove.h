@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // Ported from RemoteFM1IOS ad33e95 RFMKit/Sources/RFMCore/include/RFMMove.h; changes (Android, marked): the status's
-// clock, tempo and clicks, Sample's take (RFMM_REQ_SAMPLE_*, rfmm_take_audio), the tests' entries without a network.
+// clock, tempo and clicks, Sample's take (RFMM_REQ_SAMPLE_*, rfmm_take_audio), the tests' fake Move.
 // THE ABLETON MOVE (rfmm_*): an Ableton Move running Move Remote (github.com/Quixotic7/abletonmoveremote) as the
-// emulated FM-1's controller, through RemoteFM1's rfm_move core (MoveLink.h says how). The app keeps the settings and
-// the 32 project slots: it answers the link's requests (rfmm_take_request) and gives it the store at start.
+// emulated FM-1's controller, through rfm1cs-abletonmove's session and core (MoveLink.h says how). The app keeps the
+// settings and the 32 project slots: it answers the link's requests (rfmm_take_request) and gives it the store at start.
 //   rfmm_t *m = rfmm_new(settings, n, "RemoteFM1 iOS");   rfme_attach_move(engine, m);   rfmm_start(m, "move.local");
 // Free order: rfme_attach_move(engine, NULL), the engine's clock stopped (or the engine freed), then rfmm_free.
 #ifndef RFM_MOVE_API_H
@@ -20,8 +20,9 @@ extern "C" {
 
 typedef struct rfmm rfmm_t;
 
-enum { RFMM_OFF = 0, RFMM_CONNECTING = 1, RFMM_CONNECTED = 2, RFMM_RETRYING = 3, RFMM_ERROR = 4 };
-enum { RFMM_VIA_USB = 0, RFMM_VIA_WIFI = 1, RFMM_VIA_LOCAL = 2 };
+// the session's states (RFM1CS_*); FAILED: it gave up (another protocol version)
+enum { RFMM_OFF = 0, RFMM_CONNECTING = 1, RFMM_CONNECTED = 2, RFMM_RETRYING = 3, RFMM_FAILED = 4, RFMM_ERROR = RFMM_FAILED };
+enum { RFMM_VIA_WIFI = 0, RFMM_VIA_USB = 1, RFMM_VIA_LOCAL = 2 };     // Move Remote's MR_VIA_*, as the Move says it
 // requests (rfm_move's RFM_MOVE_ACT_* numbers)
 enum {
     RFMM_REQ_SETTINGS = 7,          // data: the settings image, to keep
@@ -42,13 +43,13 @@ typedef struct {
     int state;                      // RFMM_*
     char text[256];                 // what to show
     char name[32];                  // the Move's name (its HELLO)
-    int via;                        // RFMM_VIA_*, -1 not connected
-    int battery;                    // 0..100, -1 unknown
+    int via;                        // RFMM_VIA_*, -1 never connected (kept after the link goes)
+    int battery;                    // as the Move reports it, -1 unknown
     int mode;                       // 0 FM-1, 1 MIDI, 2 Control, 3 Sequencer
     int project;                    // the open project's slot
     int playing;                    // the sequencer plays
     int ticking;                    // a firmware runs the core (no firmware: the Move waits)
-    uint32_t inputs, leds, screens, connects, seq_midi;
+    uint32_t inputs, leds, screens, connects, seq_midi;   // (leds: LED writes)
     int following, bpm10;           // (Android) the sequencer follows the firmware's clock; its tempo x 10
     uint32_t clicks;                // (Android) metronome clicks played
 } rfmm_status_t;
@@ -84,10 +85,13 @@ void rfme_attach_move(rfme_t *e, rfmm_t *m);
 
 // ---- (Android) Sample's audio (interleaved stereo int16, up to max frames; one reader): the frames copied
 uint32_t rfmm_take_audio(rfmm_t *m, int16_t *stereo, uint32_t max);
-// ---- (Android) tests without a network: an INPUT record (its USB-MIDI packet, little-endian), the link up or down,
-// the LEDs (6 bytes each: rgb, cc, number, r, g, b) and the screen (1024 bytes; 0: none new) the network would send
+// ---- (Android) tests: a fake Move in place of the socket (it answers HELLO, sends a STATUS every 500 ms): an INPUT
+// record (its USB-MIDI packet, little-endian), up (a fresh start on it) or down (the link cut: lost, tried again in
+// 1 s), the LEDs (6 bytes each: rgb, cc, number, r, g, b) and the screen (1024 bytes; 0: none new) the session sent it;
+// rfmm_test_drop cuts the real socket (lost: it connects again)
 void rfmm_test_input(rfmm_t *m, uint32_t packet);
 void rfmm_test_connected(rfmm_t *m, int up);
+void rfmm_test_drop(rfmm_t *m);
 int rfmm_test_take_leds(rfmm_t *m, uint8_t *out6, int max);
 int rfmm_test_take_screen(rfmm_t *m, uint8_t *out1024);
 

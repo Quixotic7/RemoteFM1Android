@@ -63,15 +63,13 @@ target_sources(rfmcore PRIVATE ${R}/RFMFileApi.cpp ${R}/android/rfm_folder_jni.c
 # (ain1, RemoteFM1IOS c47ac4f) the audio input: an Oboe input stream into the engine's input ring
 target_sources(rfmcore PRIVATE ${R}/RFMOboeInput.cpp)
 
-# (the Ableton Move) RemoteFM1's rfm_move core (host/src/move, MPL-2.0, portable C99) and libmoveremote's host side
-# (third_party/moveremote: mr_client.c's POSIX sockets, mr_gfx.c, font5x7.c) as librfmmove, in rfmcore: the core on the
-# engine's core thread and the network thread (MoveLink.cpp, ported from RemoteFM1IOS ad33e95), rfmm_* (RFMMove.cpp), JNI (move_jni.cpp)
-set(MR ${RFM}/host/third_party/moveremote)
-add_library(rfmmove STATIC
-    ${RFM}/host/src/move/move.c ${RFM}/host/src/move/screen.c ${RFM}/host/src/move/seq.c ${RFM}/host/src/move/seq_ui.c
-    ${RFM}/host/src/move/project.c ${RFM}/host/src/move/v2.c
-    ${MR}/host/mr_client.c ${MR}/host/mr_gfx.c ${MR}/common/font5x7.c)
-target_include_directories(rfmmove PUBLIC ${RFM}/host/include ${MR}/include)
-target_compile_options(rfmmove PRIVATE -O2 -Wno-unused-parameter)
+# (the Ableton Move) rfm1cs-abletonmove (vendor/rfm1cs-abletonmove, MPL-2.0, portable C99): the rfm_move core, the
+# Move Remote session (protocol, pings, retries, LED and screen pacing) and its non-blocking TCP; Move Remote's client
+# and graphics vendored inside it. In rfmcore: the socket thread and the engine hook (MoveLink.cpp), rfmm_*
+# (RFMMove.cpp), JNI (move_jni.cpp). Its tests are off as a subdirectory.
+add_subdirectory(${RFM_ROOT}/vendor/rfm1cs-abletonmove ${CMAKE_BINARY_DIR}/rfm1cs)
+foreach(t rfm1cs_move rfm1cs_session rfm1cs_tcp moveremote moveremote_gfx)
+    target_compile_options(${t} PRIVATE -O2 -Wno-unused-parameter)
+endforeach()
 target_sources(rfmcore PRIVATE ${R}/MoveLink.cpp ${R}/RFMMove.cpp ${R}/move_jni.cpp)
-target_link_libraries(rfmcore PRIVATE rfmmove)
+target_link_libraries(rfmcore PRIVATE rfm1cs_session rfm1cs_tcp)

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // Ported from RemoteFM1IOS ad33e95 RFMKit/Sources/RFMCore/RFMMove.cpp; changes: the "(Android)" parts.
-// rfmm_* (RFMMove.h) over MoveLink.
+// rfmm_* (RFMMove.h) over MoveLink (rfm1cs-abletonmove's session).
 
 #include "RFMMove.h"
 
@@ -11,6 +11,7 @@
 #include <cstring>
 
 #include "MoveLink.h"
+#include "rfm1cs/store.h"
 
 using rfm::MoveLink;
 
@@ -73,16 +74,7 @@ void rfmm_project_flush(rfmm_t *m) { L(m)->flushProject(); }
 int rfmm_project_check(const uint8_t *b, uint32_t n) { return rfm_move_project_check(b, n); }
 
 // the web's withColor (js/move-projects.js): byte 18, then the FNV-1a check over all but the last 4 bytes
-void rfmm_project_with_color(uint8_t *b, uint32_t n, int color)
-{
-    if (!b || n < 23)
-        return;
-    b[18] = (uint8_t)color;
-    uint32_t h = 2166136261u;
-    for (uint32_t i = 0; i < n - 4; i++)
-        h = (h ^ b[i]) * 16777619u;
-    b[n - 4] = (uint8_t)h, b[n - 3] = (uint8_t)(h >> 8), b[n - 2] = (uint8_t)(h >> 16), b[n - 1] = (uint8_t)(h >> 24);
-}
+void rfmm_project_with_color(uint8_t *b, uint32_t n, int color) { rfm1cs_project_set_color(b, n, color); }
 
 uint32_t rfmm_project_max(void) { return RFM_MOVE_PROJECT_MAX; }
 uint32_t rfmm_settings_bytes(void) { return RFM_MOVE_SETTINGS_BYTES; }
@@ -105,12 +97,11 @@ uint32_t rfmm_take_audio(rfmm_t *m, int16_t *stereo, uint32_t max) { return L(m)
 void rfmm_test_input(rfmm_t *m, uint32_t packet)
 {
     const uint8_t p[4] = {(uint8_t)packet, (uint8_t)(packet >> 8), (uint8_t)(packet >> 16), (uint8_t)(packet >> 24)};
-    mr_event_t ev;
-    mr_decode(p, 0, &ev);
-    L(m)->testInput(ev);
+    L(m)->testInput(p);
 }
 
 void rfmm_test_connected(rfmm_t *m, int up) { L(m)->testConnected(up != 0); }
+void rfmm_test_drop(rfmm_t *m) { L(m)->testDrop(); }
 
 int rfmm_test_take_leds(rfmm_t *m, uint8_t *out6, int max)
 {
