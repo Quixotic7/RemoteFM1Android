@@ -88,7 +88,8 @@ fun MovePage(a: AppUi) {
             SheetList(Modifier.padding(top = 12.dp)) {
                 SheetRow("Battery", value = if (i.battery < 0) "--" else "${i.battery} %", chevron = false, tag = "move-battery") {}
                 SheetRow("Connected over", value = i.via.ifEmpty { "–" }, chevron = false) {}
-                SheetRow("Sequencer", value = "${if (i.playing) "playing" else "stopped"}, " +
+                SheetRow("Sequencer", value = if (!i.ticking || i.bpm10 <= 0) "waits for a firmware" else
+                    "${if (i.playing) "playing" else "stopped"}, " +
                     "${if (i.clock == "firmware") "clock from the firmware" else "clock INT"} ${"%.1f".format(i.bpm10 / 10.0)} BPM",
                     chevron = false, divider = false, tag = "move-clock") {}
             }
