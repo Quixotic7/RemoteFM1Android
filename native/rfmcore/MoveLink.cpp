@@ -72,10 +72,11 @@ void MoveLink::post(In &&m)
     cv_.notify_all();
 }
 
-void MoveLink::start(const std::string &host)
+void MoveLink::start(const std::string &host, const std::string &shown)
 {
     In m(In::kStart);
     m.bytes.assign(host.begin(), host.end());
+    m.shown = shown;
     post(std::move(m));
 }
 
@@ -134,7 +135,8 @@ void MoveLink::flushProject() { post(In(In::kFlush)); }
 
 // ------------------------------------------------------------------ the network thread ---
 // Opens and closes the socket when the session says (publish: openReq_ / closeReq_), reads into in_ tagged with the
-// try's generation, writes txq_. While no firmware runs the engine's clock it also drives the session.
+// attempt id that opened it, writes txq_. While no firmware runs the engine's clock it also drives the session (the
+// guide's third shape: the core thread's lastTickMs_ older than kDriveIdleMs).
 
 void MoveLink::netMain()
 {
@@ -145,7 +147,8 @@ void MoveLink::netMain()
     pthread_sigmask(SIG_BLOCK, &pipe, nullptr);
     pthread_setname_np(pthread_self(), "RFM Move");
 #endif
-    int fd = -1, gen = 0;
+    int fd = -1;
+    uint32_t attempt = 0;
     bool connected = false;
     std::vector<uint8_t> tx;
     std::vector<uint8_t> buf(16384);
@@ -154,7 +157,7 @@ void MoveLink::netMain()
         fd = -1;
         connected = false;
         In m(In::kClosed);
-        m.gen = gen;
+        m.attempt = attempt;
         post(std::move(m));
     };
     for (;;) {
@@ -170,7 +173,7 @@ void MoveLink::netMain()
             doClose = closeReq_, doOpen = openReq_, doDrop = dropReq_;
             closeReq_ = openReq_ = dropReq_ = false;
             if (doOpen)
-                gen = tryGen_, host = openHost_;
+                attempt = openAttempt_, host = openHost_;
             tx.swap(txq_);
         }
         if ((doClose || doOpen) && fd >= 0) {
@@ -179,14 +182,7 @@ void MoveLink::netMain()
             connected = false;
         }
         if (doOpen) {
-            std::string addr = host.empty() ? "move.local" : host;   // "address" or "address:port" (0: 7720)
-            int port = 0;
-            if (const size_t colon = addr.rfind(':'); colon != std::string::npos && addr.find(':') == colon &&
-                colon + 1 < addr.size() && addr.find_first_not_of("0123456789", colon + 1) == std::string::npos) {
-                port = std::atoi(addr.c_str() + colon + 1);
-                addr.resize(colon);
-            }
-            fd = rfm1cs_tcp_connect(addr.c_str(), port);
+            fd = rfm1cs_tcp_connect(host.c_str(), 0);   // ("address", "address:port", "[v6]:port"; no port: 7720)
             if (fd < 0)
                 lost();                         // (no address: the session tries again)
         }
@@ -200,7 +196,7 @@ void MoveLink::netMain()
             if (r > 0) {
                 connected = true;
                 In m(In::kOpened);
-                m.gen = gen;
+                m.attempt = attempt;
                 post(std::move(m));
             } else if (r < 0) {
                 lost();
@@ -209,7 +205,7 @@ void MoveLink::netMain()
             const int n = rfm1cs_tcp_read(fd, buf.data(), (int)buf.size(), 1);
             if (n > 0) {
                 In m(In::kRx);
-                m.gen = gen;
+                m.attempt = attempt;
                 m.bytes.assign(buf.begin(), buf.begin() + n);
                 post(std::move(m));
             } else if (n < 0) {
@@ -240,30 +236,29 @@ void MoveLink::drive(uint32_t now, bool core)
         }
     }
     for (In &m : work_) {
-        const bool mine = m.gen < 0 || m.gen == gen_;
+        // (an older try's socket: the session ignores it)
+        const uint32_t att = m.attempt ? m.attempt : rfm1cs_session_attempt(s_);
         const uint8_t *b = m.bytes.empty() ? nullptr : m.bytes.data();
         const uint32_t n = (uint32_t)m.bytes.size();
         switch (m.kind) {
         case In::kRx:
-            if (mine)
-                rfm1cs_session_rx(s_, now, b, n);
+            rfm1cs_session_rx(s_, now, att, b, n);
             break;
         case In::kOpened:
-            if (mine)
-                rfm1cs_session_opened(s_, now);
+            rfm1cs_session_opened(s_, now, att);
             break;
         case In::kClosed:
-            if (mine)
-                rfm1cs_session_closed(s_, now, 0);
+            rfm1cs_session_closed(s_, now, att, 0);
             break;
         case In::kStart:
             fakeUp_ = false;
-            host_d_ = m.bytes.empty() ? "move.local" : std::string(m.bytes.begin(), m.bytes.end());
+            host_d_.assign(m.bytes.begin(), m.bytes.end());
+            shown_ = !m.shown.empty() ? m.shown : !host_d_.empty() ? host_d_ : "move.local";
             rfm1cs_session_start(s_, now);
             break;
         case In::kTestUp:
             fakeUp_ = true;
-            host_d_ = "the test Move";
+            shown_ = "the test Move";
             rfm1cs_session_start(s_, now);
             break;
         case In::kStop:
@@ -310,7 +305,7 @@ bool MoveLink::publish(bool wait)
         closeReq_ = true;
         openReq_ = openLocal_;
         if (openLocal_)
-            tryGen_ = gen_, openHost_ = host_d_;
+            openAttempt_ = attemptLocal_, openHost_ = host_d_;
         closeLocal_ = openLocal_ = false;
     }
     txq_.insert(txq_.end(), txLocal_.begin(), txLocal_.end());
@@ -327,6 +322,9 @@ bool MoveLink::publish(bool wait)
     const rfm1cs_status_t &s = *rfm1cs_session_status(s_);
     st_.state = s.state;
     st_.text = text_;
+    st_.tone = tone_;
+    st_.toast = toast_;
+    st_.attempt = rfm1cs_session_attempt(s_);
     st_.name = s.name;
     st_.via = s.via;
     st_.battery = s.battery;
@@ -373,7 +371,7 @@ void MoveLink::event(const rfm1cs_event_t &ev)
         }
         return;
     case RFM1CS_EV_OPEN:
-        gen_++;
+        attemptLocal_ = ev.attempt;
         if (fakeUp_)
             fakeOpen_ = true;
         else
@@ -381,7 +379,6 @@ void MoveLink::event(const rfm1cs_event_t &ev)
         txLocal_.clear();
         return;
     case RFM1CS_EV_CLOSE:
-        gen_++;
         fakeOpen_ = fakeHello_ = false;
         if (!fakeUp_)
             closeLocal_ = true, openLocal_ = false;
@@ -390,51 +387,29 @@ void MoveLink::event(const rfm1cs_event_t &ev)
     case RFM1CS_EV_ACTION:
         action(ev);
         return;
-    case RFM1CS_EV_LOST:
-        lostText(ev.reason, ev.was_live != 0);
-        return;
-    case RFM1CS_EV_BYE:
-        text_ = ev.reason == MR_BYE_REPLACED ? "Another app took the Move." : "The Move left Move Remote.";
-        return;
-    case RFM1CS_EV_STATUS:
-        if (!(ev.changed & (RFM1CS_CH_STATE | RFM1CS_CH_HELLO)))
-            return;
-        if (st.state == RFM1CS_CONNECTING) {
-            text_ = "Connecting to " + host_d_ + "...";
-        } else if (st.state == RFM1CS_CONNECTED) {
-            text_ = std::string("Connected to ") + (st.name[0] ? st.name : "Move") +
-                    (st.via == MR_VIA_USB ? " over USB" : st.via == MR_VIA_WIFI ? " over Wi-Fi" : "");
-        } else if (st.state == RFM1CS_RETRYING && text_.find("%s") != std::string::npos) {
-            const size_t at = text_.find("%s");
-            text_.replace(at, 2, std::to_string((st.retry_ms + 999) / 1000));
-        } else if (st.state == RFM1CS_OFF && (text_.empty() || text_.rfind("Connect", 0) == 0)) {
-            text_ = "Off";
+    case RFM1CS_EV_LOST:                        // (the toast for a live link; the line follows with the STATUS)
+        if (ev.was_live) {
+            char t[200];
+            const rfm1cs_words_t w = {shown_.c_str(), nullptr, "TCP", "app"};
+            rfm1cs_lost_text(ev.reason, 1, &st, &w, t, sizeof t);
+            toast_ = t;
         }
+        return;
+    case RFM1CS_EV_STATUS:                      // (the line names the mode: made again on every change)
+        words();
         return;
     default:                                    // (RELEASED: no timed MIDI waits here, it went out at its ms)
         return;
     }
 }
 
-// what the link's end says (the retry's seconds filled in by the STATUS that follows)
-void MoveLink::lostText(int why, bool wasLive)
+// the status line and its tone: rfm1cs-abletonmove's words (the web player's and iOS's), with the address as shown
+void MoveLink::words()
 {
-    const rfm1cs_status_t &st = *rfm1cs_session_status(s_);
-    switch (why) {
-    case RFM1CS_WHY_SHUTDOWN: text_ = "The Move shut down: connecting again when it's back..."; return;
-    case RFM1CS_WHY_SILENT: text_ = "The Move stopped answering: connecting again..."; return;
-    case RFM1CS_WHY_GARBLED: text_ = "The Move's messages were garbled: connecting again..."; return;
-    case RFM1CS_WHY_NOT_MOVE: text_ = host_d_ + " answered, but not as Move Remote. Trying again in %s s."; return;
-    case RFM1CS_WHY_PROTO:
-        text_ = "The Move's Move Remote speaks protocol " + std::to_string(st.proto) + ", this app " +
-                std::to_string(MR_PROTO) + ": update the older one.";
-        return;
-    default:
-        text_ = wasLive ? "Link lost: connecting again..."
-                        : "No answer. Is Move Remote running on the Move, and is " + host_d_ +
-                              " its address? Trying again in %s s.";
-        return;
-    }
+    char t[256];
+    const rfm1cs_words_t w = {shown_.c_str(), nullptr, "TCP", "app"};
+    tone_ = rfm1cs_status_text(rfm1cs_session_status(s_), &w, t, sizeof t);
+    text_ = t;
 }
 
 void MoveLink::action(const rfm1cs_event_t &ev)
@@ -503,7 +478,7 @@ void MoveLink::testFake(uint32_t now)
     for (int guard = 0; guard < 4 && (fakeOpen_ || fakeHello_); guard++) {
         if (fakeOpen_) {
             fakeOpen_ = false;
-            rfm1cs_session_opened(s_, now);
+            rfm1cs_session_opened(s_, now, rfm1cs_session_attempt(s_));
         }
         if (fakeHello_) {
             fakeHello_ = false;
@@ -511,7 +486,7 @@ void MoveLink::testFake(uint32_t now)
             h[16] = MR_VIA_LOCAL;
             std::memcpy(h + 22, "Test", 4);
             const std::vector<uint8_t> m = framed(MR_D_HELLO, h, sizeof h);
-            rfm1cs_session_rx(s_, now, m.data(), (uint32_t)m.size());
+            rfm1cs_session_rx(s_, now, rfm1cs_session_attempt(s_), m.data(), (uint32_t)m.size());
             fakeStatusAt_ = now;
         }
     }
@@ -520,7 +495,7 @@ void MoveLink::testFake(uint32_t now)
         uint8_t st[MR_STATUS_LEN] = {};
         st[4] = 80;                             // (battery)
         const std::vector<uint8_t> m = framed(MR_D_STATUS, st, sizeof st);
-        rfm1cs_session_rx(s_, now, m.data(), (uint32_t)m.size());
+        rfm1cs_session_rx(s_, now, rfm1cs_session_attempt(s_), m.data(), (uint32_t)m.size());
     }
 }
 
@@ -722,8 +697,15 @@ void MoveLink::testConnected(bool up)
         }
         post(In(In::kTestUp));
     } else {
-        post(In(In::kClosed));                  // (gen -1: whatever the try)
+        testClose(0);
     }
+}
+
+void MoveLink::testClose(uint32_t attempt)
+{
+    In m(In::kClosed);
+    m.attempt = attempt;
+    post(std::move(m));
 }
 
 void MoveLink::testDrop()

@@ -3,8 +3,9 @@
 // The Ableton Move as the emulated FM-1's controller, on rfm1cs-abletonmove's session (vendor/rfm1cs-abletonmove,
 // include/rfm1cs/session.h: Move Remote's protocol, HELLO, pings, silence, retries 1/2/4 s, LEDs on change, the screen
 // at most every 33 ms; it owns the rfm_move core). This class is the host around it:
-//   network thread  the socket (rfm1cs_tcp): opens and closes it when the session says, reads into a queue, writes
-//                   what the session sent; SIGPIPE blocked
+//   network thread  the socket (rfm1cs_tcp): opens and closes it when the session says, reads into a queue (each
+//                   event with the attempt id of the EV_OPEN that opened it: the session ignores an older try's),
+//                   writes what the session sent; SIGPIPE blocked
 //   core thread     the engine's (RFMEngine's between hook, once a device millisecond) drives the session: the queued
 //                   bytes into rfm1cs_session_rx, _tick, _advance by the device clock (the sequencer's notes into the
 //                   firmware at that millisecond), the FM-1's LEDs (_panel), its screen (_frame), the firmware's MIDI
@@ -46,7 +47,9 @@ class MoveLink {
 public:
     struct Status {
         int state = RFM1CS_OFF;     // RFM1CS_* (OFF, CONNECTING, CONNECTED, RETRYING, FAILED)
-        std::string text, name;     // what to show; the Move's name (its HELLO)
+        std::string text, name;     // what to show (rfm1cs_status_text); the Move's name (its HELLO)
+        int tone = 0;               // the text's RFM1CS_TONE_* (OFF, BUSY, ON, BAD)
+        std::string toast;          // the last live link's loss (rfm1cs_lost_text), "" none
         int via = -1;               // MR_VIA_* as the Move said it (0 Wi-Fi, 1 USB, 2 this computer), -1 none
         int battery = -1;           // as the Move reports it, -1 unknown
         int mode = 0;               // 0..3: FM-1, MIDI, Control, Sequencer
@@ -57,6 +60,7 @@ public:
         bool following = false;     // the sequencer follows the firmware's MIDI clock
         int bpm10 = 0;              // its tempo, BPM x 10
         uint32_t clicks = 0;        // metronome clicks played
+        uint32_t attempt = 0;       // the session's try (EV_OPEN's id; tests)
     };
     // a request for the app (projects, settings): kind is an RFM_MOVE_ACT_PROJECT_* or RFM_MOVE_ACT_SETTINGS
     struct Request {
@@ -71,7 +75,9 @@ public:
     ~MoveLink();
 
     // ---- any thread (the app)
-    void start(const std::string &host);     // "address" or "address:port" ("": move.local)
+    // host: what rfm1cs_tcp_connect takes ("address", "address:port", "[v6]:port"; "": move.local); shown: the
+    // address in the status texts ("": host)
+    void start(const std::string &host, const std::string &shown = "");
     void stop();
     Status status() const;
     bool takeRequest(Request &r);
@@ -99,15 +105,18 @@ public:
     int testTakeLeds(rfm_move_led_t *out, int max);
     bool testTakeScreen(uint8_t *out);
     void testDrop();                         // the real socket cut under the session (lost: it tries again)
+    void testClose(uint32_t attempt);        // a close from that try's socket (0: the current one; an older: ignored)
 
 private:
-    // from the app and the network thread to the driver; gen: the socket try it belongs to (-1: any)
+    // from the app and the network thread to the driver; attempt: the socket's try (EV_OPEN's id), 0 the current one
+    // (the tests' fake Move)
     struct In {
         enum Kind { kRx, kOpened, kClosed, kStart, kStop, kInit, kDir, kInfo, kAnswer, kFlush, kTestUp } kind;
         explicit In(Kind k) : kind(k) {}
-        int gen = -1, slot = -1, a = 0;
-        uint32_t bits = 0;
+        uint32_t attempt = 0, bits = 0;
+        int slot = -1;
         std::vector<uint8_t> bytes;
+        std::string shown;
     };
     struct Pending {                         // a panel or MIDI action taken while the core thread was not driving
         bool midi;
@@ -120,7 +129,7 @@ private:
     static void onEvent(void *ctx, const rfm1cs_event_t *ev);
     void event(const rfm1cs_event_t &ev);
     void action(const rfm1cs_event_t &ev);
-    void lostText(int why, bool wasLive);
+    void words();                            // text_ and tone_ from the session's status
     // the driver's pass (smu_ held): the queue into the session, the timers, the fake Move, then publish()
     void drive(uint32_t now, bool core);
     void testFake(uint32_t now);
@@ -136,9 +145,9 @@ private:
     bool quit_ = false;
     std::deque<In> in_;
     std::deque<Request> requests_;           // core -> app
-    // driver -> network: open (tryGen_) / close the socket, bytes to write
+    // driver -> network: open (attempt openAttempt_) / close the socket, bytes to write
     bool openReq_ = false, closeReq_ = false, dropReq_ = false;
-    int tryGen_ = 0;
+    uint32_t openAttempt_ = 0;
     std::string openHost_;
     std::vector<uint8_t> txq_;
     std::vector<rfm_move_led_t> ledsOut_;    // (tests) what the session sent the fake Move
@@ -150,10 +159,11 @@ private:
     std::mutex smu_;
     rfm1cs_session_t *s_ = nullptr;
     bool core_ = false;                      // the core thread drives this pass
-    int gen_ = 0;                            // the socket try the session is on
-    std::string host_d_ = "move.local";      // (the driver's copy, for the texts)
-    std::string text_;
+    std::string host_d_ = "move.local", shown_ = "move.local";   // (the driver's copies: to open; for the texts)
+    std::string text_ = "Not connected.", toast_;
+    int tone_ = RFM1CS_TONE_OFF;
     bool openLocal_ = false, closeLocal_ = false;
+    uint32_t attemptLocal_ = 0;              // the EV_OPEN's id the socket opens with
     std::vector<uint8_t> txLocal_;
     std::deque<Request> reqLocal_;
     std::vector<rfm_move_led_t> ledsLocal_;

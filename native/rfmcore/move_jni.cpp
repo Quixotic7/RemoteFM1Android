@@ -40,26 +40,27 @@ JNIEXPORT jlong JNICALL F(nativeNew)(JNIEnv *env, jclass, jbyteArray settings)
 
 JNIEXPORT void JNICALL F(nativeFree)(JNIEnv *, jclass, jlong h) { rfmm_free(mv(h)); }
 
-JNIEXPORT void JNICALL F(nativeStart)(JNIEnv *env, jclass, jlong h, jstring host)
+JNIEXPORT void JNICALL F(nativeStart)(JNIEnv *env, jclass, jlong h, jstring host, jstring shown)
 {
-    const char *s = env->GetStringUTFChars(host, nullptr);
-    rfmm_start(mv(h), s);
+    const char *s = env->GetStringUTFChars(host, nullptr), *w = env->GetStringUTFChars(shown, nullptr);
+    rfmm_start_shown(mv(h), s, w);
+    env->ReleaseStringUTFChars(shown, w);
     env->ReleaseStringUTFChars(host, s);
 }
 
 JNIEXPORT void JNICALL F(nativeStop)(JNIEnv *, jclass, jlong h) { rfmm_stop(mv(h)); }
 
-// out (20 ints): state via battery mode project playing ticking inputs leds screens connects seq_midi following
-// bpm10 clicks; returns "name\ntext"
+// out (17 ints): state via battery mode project playing ticking inputs leds screens connects seq_midi following
+// bpm10 clicks tone attempt; returns "name\ntext\ntoast"
 JNIEXPORT jstring JNICALL F(nativeStatus)(JNIEnv *env, jclass, jlong h, jintArray out)
 {
     rfmm_status_t s;
     rfmm_status(mv(h), &s);
-    const jint v[15] = {s.state, s.via, s.battery, s.mode, s.project, s.playing, s.ticking, (jint)s.inputs,
+    const jint v[17] = {s.state, s.via, s.battery, s.mode, s.project, s.playing, s.ticking, (jint)s.inputs,
                         (jint)s.leds, (jint)s.screens, (jint)s.connects, (jint)s.seq_midi, s.following, s.bpm10,
-                        (jint)s.clicks};
-    env->SetIntArrayRegion(out, 0, 15, v);
-    std::string t = std::string(s.name) + "\n" + s.text;
+                        (jint)s.clicks, s.tone, (jint)s.attempt};
+    env->SetIntArrayRegion(out, 0, 17, v);
+    std::string t = std::string(s.name) + "\n" + s.text + "\n" + s.toast;
     return env->NewStringUTF(t.c_str());
 }
 
@@ -108,6 +109,7 @@ JNIEXPORT jbyteArray JNICALL F(nativeWithColor)(JNIEnv *env, jclass, jbyteArray 
     return a;
 }
 JNIEXPORT jint JNICALL F(nativeProjectMax)(JNIEnv *, jclass) { return (jint)rfmm_project_max(); }
+
 JNIEXPORT jbyteArray JNICALL F(nativeTestEmptyProject)(JNIEnv *env, jclass)
 {
     std::vector<uint8_t> b(rfmm_project_max());
@@ -133,6 +135,7 @@ JNIEXPORT jint JNICALL F(nativeTakeAudio)(JNIEnv *env, jclass, jlong h, jshortAr
 JNIEXPORT void JNICALL F(nativeTestInput)(JNIEnv *, jclass, jlong h, jint packet) { rfmm_test_input(mv(h), (uint32_t)packet); }
 JNIEXPORT void JNICALL F(nativeTestConnected)(JNIEnv *, jclass, jlong h, jboolean up) { rfmm_test_connected(mv(h), up ? 1 : 0); }
 JNIEXPORT void JNICALL F(nativeTestDrop)(JNIEnv *, jclass, jlong h) { rfmm_test_drop(mv(h)); }
+JNIEXPORT void JNICALL F(nativeTestClose)(JNIEnv *, jclass, jlong h, jint attempt) { rfmm_test_close(mv(h), (uint32_t)attempt); }
 JNIEXPORT jint JNICALL F(nativeTestTakeLeds)(JNIEnv *env, jclass, jlong h, jbyteArray out)
 {
     const jsize max = env->GetArrayLength(out) / 6;

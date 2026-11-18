@@ -44,16 +44,28 @@ object MoveNative {
         val following = v[12] != 0
         val bpm10 = v[13]
         val clicks = v[14]
-        val name = nameText.substringBefore('\n')
-        val text = nameText.substringAfter('\n', "")
+        val tone = v[15]                    // text's RFM1CS_TONE_*: TONE_OFF, _BUSY, _ON, _BAD
+        val attempt = v[16]                 // the session's try (tests)
+        private val parts = nameText.split('\n')
+        val name = parts[0]
+        /** the status line (rfm1cs_status_text: the web player's and iOS's words) */
+        val text = parts.getOrElse(1) { "" }
+        /** the last live link's loss, as a toast (rfm1cs_lost_text); "" none */
+        val toast = parts.getOrElse(2) { "" }
     }
+
+    const val TONE_OFF = 0
+    const val TONE_BUSY = 1
+    const val TONE_ON = 2
+    const val TONE_BAD = 3
 
     fun create(settings: ByteArray?): Long = nativeNew(settings)
     fun free(h: Long) = nativeFree(h)
-    /** connects (and again while wanted); host: "address" or "address:port" */
-    fun start(h: Long, host: String) = nativeStart(h, host)
+    /** connects (and again while wanted); host: "address", "address:port" or "[v6]:port" (rfm1cs_tcp_connect's);
+     *  shown: the address the status texts name (blank: host) */
+    fun start(h: Long, host: String, shown: String = "") = nativeStart(h, host, shown)
     fun stop(h: Long) = nativeStop(h)
-    fun status(h: Long): Status { val v = IntArray(15); return Status(v, nativeStatus(h, v)) }
+    fun status(h: Long): Status { val v = IntArray(17); return Status(v, nativeStatus(h, v)) }
     /** the next request: out = kind, slot, value, total; its data in [data]; the data's length, -1 none */
     fun takeRequest(h: Long, out: IntArray, data: ByteArray): Int = nativeTakeRequest(h, out, data)
     fun projectsInit(h: Long, dir: Int, slot: Int, blob: ByteArray?) = nativeProjectsInit(h, dir, slot, blob)
@@ -67,10 +79,12 @@ object MoveNative {
     fun takeAudio(h: Long, stereo: ShortArray): Int = nativeTakeAudio(h, stereo)
 
     // tests: a fake Move in place of the socket (it answers HELLO and sends a STATUS every 500 ms); down: the link cut
-    // (lost, tried again in 1 s); testDrop: the real socket cut
+    // (lost, tried again in 1 s); testDrop: the real socket cut; testClose: a close from that try's socket (0: the
+    // current one; an older try's is ignored)
     fun testInput(h: Long, packet: Int) = nativeTestInput(h, packet)
     fun testConnected(h: Long, up: Boolean) = nativeTestConnected(h, up)
     fun testDrop(h: Long) = nativeTestDrop(h)
+    fun testClose(h: Long, attempt: Int) = nativeTestClose(h, attempt)
     fun testTakeLeds(h: Long, out: ByteArray): Int = nativeTestTakeLeds(h, out)
     fun testTakeScreen(h: Long, out: ByteArray): Boolean = nativeTestTakeScreen(h, out)
 
@@ -80,7 +94,7 @@ object MoveNative {
 
     @JvmStatic private external fun nativeNew(settings: ByteArray?): Long
     @JvmStatic private external fun nativeFree(h: Long)
-    @JvmStatic private external fun nativeStart(h: Long, host: String)
+    @JvmStatic private external fun nativeStart(h: Long, host: String, shown: String)
     @JvmStatic private external fun nativeStop(h: Long)
     @JvmStatic private external fun nativeStatus(h: Long, out: IntArray): String
     @JvmStatic private external fun nativeTakeRequest(h: Long, out: IntArray, data: ByteArray): Int
@@ -97,6 +111,7 @@ object MoveNative {
     @JvmStatic private external fun nativeTestInput(h: Long, packet: Int)
     @JvmStatic private external fun nativeTestConnected(h: Long, up: Boolean)
     @JvmStatic private external fun nativeTestDrop(h: Long)
+    @JvmStatic private external fun nativeTestClose(h: Long, attempt: Int)
     @JvmStatic private external fun nativeTestTakeLeds(h: Long, out: ByteArray): Int
     @JvmStatic private external fun nativeTestTakeScreen(h: Long, out: ByteArray): Boolean
 }

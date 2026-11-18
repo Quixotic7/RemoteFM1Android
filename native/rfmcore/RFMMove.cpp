@@ -26,6 +26,7 @@ rfmm_t *rfmm_new(const uint8_t *settings, uint32_t n, const char *host_name)
 
 void rfmm_free(rfmm_t *m) { delete L(m); }
 void rfmm_start(rfmm_t *m, const char *host) { L(m)->start(host ? host : ""); }
+void rfmm_start_shown(rfmm_t *m, const char *host, const char *shown) { L(m)->start(host ? host : "", shown ? shown : ""); }
 void rfmm_stop(rfmm_t *m) { L(m)->stop(); }
 
 void rfmm_status(rfmm_t *m, rfmm_status_t *st)
@@ -49,6 +50,9 @@ void rfmm_status(rfmm_t *m, rfmm_status_t *st)
     st->following = s.following;                // (Android)
     st->bpm10 = s.bpm10;
     st->clicks = s.clicks;
+    st->tone = s.tone;                          // (Android)
+    std::snprintf(st->toast, sizeof st->toast, "%s", s.toast.c_str());
+    st->attempt = s.attempt;
 }
 
 int rfmm_take_request(rfmm_t *m, rfmm_request_t *r, uint8_t *data, uint32_t cap)
@@ -102,6 +106,7 @@ void rfmm_test_input(rfmm_t *m, uint32_t packet)
 
 void rfmm_test_connected(rfmm_t *m, int up) { L(m)->testConnected(up != 0); }
 void rfmm_test_drop(rfmm_t *m) { L(m)->testDrop(); }
+void rfmm_test_close(rfmm_t *m, uint32_t attempt) { L(m)->testClose(attempt); }
 
 int rfmm_test_take_leds(rfmm_t *m, uint8_t *out6, int max)
 {

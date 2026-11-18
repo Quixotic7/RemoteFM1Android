@@ -41,7 +41,7 @@ enum {
 
 typedef struct {
     int state;                      // RFMM_*
-    char text[256];                 // what to show
+    char text[256];                 // what to show (rfm1cs_status_text: the web player's and iOS's words)
     char name[32];                  // the Move's name (its HELLO)
     int via;                        // RFMM_VIA_*, -1 never connected (kept after the link goes)
     int battery;                    // as the Move reports it, -1 unknown
@@ -52,6 +52,9 @@ typedef struct {
     uint32_t inputs, leds, screens, connects, seq_midi;   // (leds: LED writes)
     int following, bpm10;           // (Android) the sequencer follows the firmware's clock; its tempo x 10
     uint32_t clicks;                // (Android) metronome clicks played
+    int tone;                       // (Android) text's RFM1CS_TONE_*: 0 off, 1 busy, 2 on, 3 bad
+    char toast[200];                // (Android) the last live link's loss (rfm1cs_lost_text), "" none
+    uint32_t attempt;               // (Android) the session's try (tests)
 } rfmm_status_t;
 
 typedef struct {
@@ -62,7 +65,9 @@ typedef struct {
 
 rfmm_t *rfmm_new(const uint8_t *settings, uint32_t n, const char *host_name);   // settings: NULL for the defaults
 void rfmm_free(rfmm_t *m);
-void rfmm_start(rfmm_t *m, const char *host);      // NULL or "": move.local
+void rfmm_start(rfmm_t *m, const char *host);      // NULL or "": move.local; "host:port", "[v6]:port" too
+// (Android) host as rfmm_start; shown: the address in the status texts (the typed name while host is mDNS's answer)
+void rfmm_start_shown(rfmm_t *m, const char *host, const char *shown);
 void rfmm_stop(rfmm_t *m);
 void rfmm_status(rfmm_t *m, rfmm_status_t *st);
 // 1: a request (its data in data, at most cap bytes: give rfmm_project_max()), 0: none
@@ -88,10 +93,12 @@ uint32_t rfmm_take_audio(rfmm_t *m, int16_t *stereo, uint32_t max);
 // ---- (Android) tests: a fake Move in place of the socket (it answers HELLO, sends a STATUS every 500 ms): an INPUT
 // record (its USB-MIDI packet, little-endian), up (a fresh start on it) or down (the link cut: lost, tried again in
 // 1 s), the LEDs (6 bytes each: rgb, cc, number, r, g, b) and the screen (1024 bytes; 0: none new) the session sent it;
-// rfmm_test_drop cuts the real socket (lost: it connects again)
+// rfmm_test_drop cuts the real socket (lost: it connects again); rfmm_test_close: a close from that try's socket (0
+// the current one; an older one is ignored)
 void rfmm_test_input(rfmm_t *m, uint32_t packet);
 void rfmm_test_connected(rfmm_t *m, int up);
 void rfmm_test_drop(rfmm_t *m);
+void rfmm_test_close(rfmm_t *m, uint32_t attempt);
 int rfmm_test_take_leds(rfmm_t *m, uint8_t *out6, int max);
 int rfmm_test_take_screen(rfmm_t *m, uint8_t *out1024);
 

@@ -93,8 +93,8 @@ class MoveLink(
             var host = a.host
             if (a.isMdns) (try { mdns(a.host) } catch (_: Exception) { null })?.let { host = it }
             if (g != gen) return@Thread
-            // ("address:port" as MoveLink.cpp splits it; an IPv6 address goes alone, on the default port)
-            MoveNative.start(h, if (a.port != MoveAddress.PORT && !host.contains(':')) "$host:${a.port}" else host)
+            // (rfm1cs_tcp_connect splits "host:port" / "[v6]:port"; the texts name the address as typed)
+            MoveNative.start(h, MoveAddress(host, a.port).text, a.text)
         }, "RFM Move resolve").apply { isDaemon = true; start() }
     }
 
@@ -164,28 +164,28 @@ class MoveLink(
         val name = st.name.ifEmpty { "The Move" }
         if (st.state != was) {
             if (on) toast("$name is the FM-1's controller now.", true)
-            else if (was == MoveNative.CONNECTED && st.state == MoveNative.RETRYING) toast("$name: ${st.text}")
+            else if (was == MoveNative.CONNECTED && st.state == MoveNative.RETRYING && st.toast.isNotEmpty()) toast(st.toast)
             log?.invoke("move: ${st.state} ${st.text}")
         }
-        val t = when (st.state) {
-            MoveNative.CONNECTED -> Tone.ON
-            MoveNative.CONNECTING, MoveNative.RETRYING -> Tone.BUSY
-            MoveNative.FAILED -> Tone.BAD
+        // the line and its tone are rfm1cs_status_text's (the web player's and iOS's words)
+        val t = when (st.tone) {
+            MoveNative.TONE_ON -> Tone.ON
+            MoveNative.TONE_BUSY -> Tone.BUSY
+            MoveNative.TONE_BAD -> Tone.BAD
             else -> Tone.OFF
         }
         val mode = MODES.getOrElse(st.mode) { "" }
         val d = when {
-            on && !st.ticking -> "${st.text}. No firmware is running: the Move waits for one."
-            on -> "${st.text}: $mode mode. Track 1..4 pick the mode."
+            on && !st.ticking -> "${st.text} No firmware is running: the Move waits for one."
             st.state == MoveNative.OFF && !want -> "Not connected."
-            st.state == MoveNative.OFF -> st.text.ifEmpty { "Not connected." }.let { if (it == "Off") "Not connected." else it }
-            else -> st.text
+            else -> st.text.ifEmpty { "Not connected." }
         }
         val i = if (!on) Info() else Info(st.name, via, st.battery, if (st.following) "firmware" else "INT", st.bpm10,
             st.playing, st.project, mode, st.ticking)
         main {
-            if (st.state == MoveNative.OFF && want && was == MoveNative.CONNECTED) want = false   // (BYE: it left)
-            if (want || st.state != MoveNative.OFF) { tone = t; detail = d }
+            val left = st.state == MoveNative.OFF && want && was == MoveNative.CONNECTED   // (BYE: it left; its words)
+            if (left) want = false
+            if (want || left || st.state != MoveNative.OFF) { tone = t; detail = d }
             live = on
             if (i != info) info = i
         }
