@@ -21,7 +21,7 @@ set(FM1VST ${RFM_ROOT}/vendor/FM1VST)
 
 add_library(remotefm1 STATIC
     ${RFM}/host/src/codec.c ${RFM}/host/src/screen.c ${RFM}/host/src/tiles_ref.c ${RFM}/host/src/panel.c
-    ${RFM}/host/src/session.c ${RFM}/host/src/fake.c)
+    ${RFM}/host/src/session.c ${RFM}/host/src/fake.c ${RFM}/host/src/audio.c)
 target_include_directories(remotefm1 PUBLIC ${RFM}/host/include ${RFM}/proto PRIVATE ${RFM}/firmware/src)
 target_compile_options(remotefm1 PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
