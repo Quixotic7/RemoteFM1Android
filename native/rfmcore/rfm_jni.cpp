@@ -24,6 +24,7 @@
 #include "RFMOboeInput.h"
 #include "RFMRealtime.h"
 #include "RFMWasm.h"
+#include "RFMMove.h"
 
 namespace {
 
@@ -991,6 +992,34 @@ JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTestPacedSto
 JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeTestSlowdown(JNIEnv *, jclass, jlong p, jfloat f)
 {
     rfme_test_slowdown(host(p)->e, f);
+}
+
+// ---- (the Ableton Move, RFMMove.h) the hook on this engine's core thread (0: none)
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeMoveAttach(JNIEnv *, jclass, jlong p, jlong m)
+{
+    Lock l(host(p)->ctl);
+    rfme_attach_move(host(p)->e, reinterpret_cast<rfmm_t *>(m));
+}
+
+// (tests) nativeRenderBlocks with each MIDI out packet's frame: pairs (frame from the first render's start, packet)
+JNIEXPORT jintArray JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeRenderMidiAt(JNIEnv *env, jclass, jlong p,
+                                                                                      jint count, jint frames, jdouble rate)
+{
+    Host *h = host(p);
+    std::vector<float> L((size_t)frames), R((size_t)frames);
+    std::vector<jint> out;
+    for (int i = 0; i < count; i++) {
+        rfme_render_midi(h->e, L.data(), R.data(), (uint32_t)frames, rate, nullptr, 0);
+        uint32_t pkt = 0, off = 0;
+        while (rfme_midi_out_take_at(h->e, &pkt, &off)) {
+            out.push_back((jint)((int64_t)i * frames + off));
+            out.push_back((jint)pkt);
+        }
+    }
+    jintArray a = env->NewIntArray((jsize)out.size());
+    if (a && !out.empty())
+        env->SetIntArrayRegion(a, 0, (jsize)out.size(), out.data());
+    return a;
 }
 
 } // extern "C"

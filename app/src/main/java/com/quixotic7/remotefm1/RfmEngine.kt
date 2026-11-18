@@ -255,6 +255,14 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
     /** the core thread's every chunk takes [factor] times as long (a slower CPU) */
     fun testSlowdown(factor: Float) = nativeTestSlowdown(handle, factor)
 
+    // ---- (the Ableton Move, move/MoveLink.kt) the hook on the engine's core thread: a MoveNative handle, 0 none
+    fun moveAttach(move: Long) = nativeMoveAttach(handle, move)
+
+    /** Tests, with [CLOCK_AUDIO] and [setOffline] on: [renderBlocks] with each MIDI out packet's frame (pairs: frame
+     *  from the first render's start, packet) */
+    fun renderMidiAt(count: Int, frames: Int = 512, rate: Double = 48000.0): IntArray =
+        nativeRenderMidiAt(handle, count, frames, rate)
+
     override fun close() {
         if (handle != 0L) {
             nativeDestroy(handle)
@@ -358,5 +366,7 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         @JvmStatic private external fun nativeTestPacedStop(h: Long)
         @JvmStatic private external fun nativeTestSlowdown(h: Long, f: Float)
         @JvmStatic private external fun nativeAudioInOf(path: String): Int
+        @JvmStatic private external fun nativeMoveAttach(h: Long, move: Long)
+        @JvmStatic private external fun nativeRenderMidiAt(h: Long, count: Int, frames: Int, rate: Double): IntArray
     }
 }
