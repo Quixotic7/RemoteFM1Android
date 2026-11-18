@@ -19,3 +19,6 @@
 [submodule "vendor/loom"]
 	path = vendor/loom
 	url = https://github.com/charlesvestal/fm1-loom.git
+[submodule "vendor/rfm1cs-abletonmove"]
+	path = vendor/rfm1cs-abletonmove
+	url = https://github.com/Quixotic7/rfm1cs-abletonmove.git
