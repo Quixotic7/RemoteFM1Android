@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 RemoteFM1 contributors
 // The Ableton Move's Kotlin side on the JVM: the address as typed (move-link.js normalizeUrl's cases), the projects'
-// file (move-projects.js packFile / unpackFile / withColor, with the web's refusals) and their store (one .rfmmove a
-// slot, iOS's names), the settings in the preferences, the mDNS question and its answer, and Sample's WAV.
+// file (Android's pre-0.3.0 writer against the golden files; the shared rfm1cs_file_* is MoveCoreTest's), withColor,
+// and their store (one .rfmmove a slot, iOS's names), the settings in the preferences, the mDNS question and its answer, and Sample's WAV.
 package com.quixotic7.remotefm1.move
 
 import org.junit.Assert.assertArrayEquals
@@ -50,51 +50,108 @@ class MoveAddressTest {
     }
 }
 
+/** Android's own RMVP writer and reader before rfm1cs-abletonmove 0.3.0 (MoveProjects.packFile / unpackFile at
+ *  a0d0fe6, as they were): the reference the shared rfm1cs_file_* must match byte for byte (the golden files in
+ *  androidTest/assets/rmvp, from rfm1cs-abletonmove tests/rmvp, are what it wrote), and the store's codec on the JVM */
+class KotlinRmvp(private val check: (ByteArray) -> Int = { 0 }) : MoveFileCodec {
+    override fun pack(ps: List<MoveProject>, kind: Int): ByteArray {
+        val n = ps.fold(HEAD) { a, p -> a + ENTRY + p.bytes.size }
+        val out = ByteArray(n)
+        MAGIC.copyInto(out)
+        out[4] = FILE_VERSION.toByte(); out[5] = kind.toByte()
+        le16(out, 6, ps.size)
+        var o = HEAD
+        for (p in ps) {
+            out[o] = p.slot.toByte(); out[o + 1] = 0
+            le32(out, o + 2, if (p.saved > 0) (p.saved / 1000).toInt() else 0)
+            le32(out, o + 6, p.bytes.size)
+            p.bytes.copyInto(out, o + ENTRY)
+            o += ENTRY + p.bytes.size
+        }
+        return out
+    }
+
+    override fun unpack(bytes: ByteArray?): MoveProjects.Unpacked {
+        fun bad(why: String): Nothing = throw IllegalArgumentException("Not a Move project file: $why.")
+        if (bytes == null) bad("nothing to read")
+        if (bytes.size > MAX_FILE) bad("it is ${bytes.size} bytes, more than a full set ($MAX_FILE)")
+        if (bytes.size < HEAD || (0 until 4).any { bytes[it] != MAGIC[it] }) bad("it does not start with RMVP")
+        if (bytes[4].toInt() != FILE_VERSION) bad("version ${bytes[4]}; this app reads version $FILE_VERSION")
+        val kind = bytes[5].toInt()
+        val count = u16(bytes, 6)
+        if (kind != KIND_ONE && kind != KIND_SET) bad("kind $kind")
+        if (count < 1 || count > SLOTS || (kind == KIND_ONE && count != 1)) bad("$count projects")
+        val entries = ArrayList<MoveProject>()
+        val seen = HashSet<Int>()
+        var o = HEAD
+        for (i in 0 until count) {
+            if (o + ENTRY > bytes.size) bad("project ${i + 1} is cut off")
+            val slot = bytes[o].toInt() and 255
+            val t = u32(bytes, o + 2)
+            val len = u32(bytes, o + 6)
+            if (!MoveProjects.validSlot(slot) || slot in seen) bad("slot ${slot + 1} ${if (slot in seen) "twice" else "out of range"}")
+            if (len < 1 || len > BLOB_MAX) bad("project ${i + 1} is $len bytes")
+            if (o + ENTRY + len > bytes.size) bad("project ${i + 1} is cut off")
+            val blob = bytes.copyOfRange(o + ENTRY, o + ENTRY + len.toInt())
+            val r = try { check(blob) } catch (_: Exception) { -1 }
+            if (r != 0) bad("project ${i + 1} (slot ${slot + 1}) is damaged")
+            seen += slot
+            entries += MoveProject(slot, blob, if (t > 0) t * 1000 else System.currentTimeMillis())
+            o += ENTRY + len.toInt()
+        }
+        if (o != bytes.size) bad("${bytes.size - o} bytes after the last project")
+        return MoveProjects.Unpacked(kind, entries)
+    }
+
+    companion object {
+        const val SLOTS = 32
+        const val BLOB_MAX = 39072                  // (the stale copy: RFM_MOVE_PROJECT_MAX is 39200)
+        val MAGIC = byteArrayOf(0x52, 0x4d, 0x56, 0x50)
+        const val FILE_VERSION = 1
+        const val KIND_ONE = 1
+        const val KIND_SET = 2
+        const val HEAD = 8
+        const val ENTRY = 10
+        const val MAX_FILE = HEAD + SLOTS * (ENTRY + BLOB_MAX)
+        private fun le16(b: ByteArray, o: Int, v: Int) { b[o] = v.toByte(); b[o + 1] = (v shr 8).toByte() }
+        private fun le32(b: ByteArray, o: Int, v: Int) { for (k in 0 until 4) b[o + k] = (v ushr (8 * k)).toByte() }
+        private fun u16(b: ByteArray, o: Int) = (b[o].toInt() and 255) or ((b[o + 1].toInt() and 255) shl 8)
+        private fun u32(b: ByteArray, o: Int): Long =
+            (0 until 4).fold(0L) { a, k -> a or ((b[o + k].toLong() and 255) shl (8 * k)) }
+    }
+}
+
 class MoveProjectsTest {
     // a stand-in blob: "RMSQ", 20 bytes of body, its FNV-1a (the core's check is the emulator test's)
     private fun blob(seed: Int, n: Int = 40): ByteArray = MoveProjects.withColor(ByteArray(n) { (it * 7 + seed).toByte() }.also {
         it[0] = 'R'.code.toByte(); it[1] = 'M'.code.toByte(); it[2] = 'S'.code.toByte(); it[3] = 'Q'.code.toByte()
     }, 0)
     private val ok: (ByteArray) -> Int = { 0 }
+    private val codec = KotlinRmvp(ok)
 
-    @Test fun packAndUnpack() {
-        val a = MoveProject(3, blob(1), 1_700_000_000_000L)
-        val b = MoveProject(10, blob(2, 60), 0)
-        val one = MoveProjects.packFile(listOf(a))
-        assertEquals(MoveProjects.KIND_ONE, one[5].toInt())
-        assertEquals(MoveProjects.HEAD + MoveProjects.ENTRY + a.bytes.size, one.size)
-        val u = MoveProjects.unpackFile(one, ok)
-        assertEquals(1, u.entries.size)
-        assertEquals(3, u.entries[0].slot)
-        assertArrayEquals(a.bytes, u.entries[0].bytes)
-        assertEquals(1_700_000_000_000L, u.entries[0].saved)
-        val set = MoveProjects.unpackFile(MoveProjects.packFile(listOf(a, b)), ok)
-        assertEquals(MoveProjects.KIND_SET, set.kind)
-        assertEquals(listOf(3, 10), set.entries.map { it.slot })
-        // the web's layout: "RMVP" 1 kind count16, slot flags saved32 len32
-        assertArrayEquals(byteArrayOf(0x52, 0x4d, 0x56, 0x50, 1, 1, 1, 0, 3, 0), one.copyOf(10))
+    /** the golden files (rfm1cs-abletonmove tests/rmvp, copied to androidTest/assets/rmvp for MoveCoreTest) */
+    private fun golden(name: String): ByteArray =
+        listOf(File("src/androidTest/assets/rmvp/$name"), File("app/src/androidTest/assets/rmvp/$name")).first { it.isFile }.readBytes()
+
+    /** Android's pre-0.3.0 writer made exactly the golden files that MoveCoreTest compares rfm1cs_file_pack with */
+    @Test fun theOldWriterMadeTheGoldenFiles() {
+        val a = golden("blob_a.bin")
+        val b = golden("blob_b.bin")
+        assertArrayEquals(golden("android.rfmmove"), codec.pack(listOf(MoveProject(3, a, 1_794_909_600_000L)), MoveProjects.KIND_ONE))
+        assertArrayEquals(golden("android.rfmmoveset"), codec.pack(listOf(MoveProject(0, a, 1_794_909_600_000L),
+            MoveProject(5, b, 1_794_990_615_000L)), MoveProjects.KIND_SET))
+        // (the submodule's copy, when it is checked out, is the same)
+        val vendor = listOf(File("../vendor/rfm1cs-abletonmove/tests/rmvp"), File("vendor/rfm1cs-abletonmove/tests/rmvp")).firstOrNull { it.isDirectory }
+        if (vendor != null) for (n in listOf("android.rfmmove", "android.rfmmoveset", "blob_a.bin", "blob_b.bin"))
+            assertArrayEquals(n, File(vendor, n).readBytes(), golden(n))
     }
 
-    private fun refused(b: ByteArray?, says: String, check: (ByteArray) -> Int = ok) {
-        try { MoveProjects.unpackFile(b, check); fail("accepted: $says") } catch (e: IllegalArgumentException) {
-            assertTrue("${e.message} / $says", e.message!!.contains(says))
+    /** the old reader refused a blob of 39073..39200 bytes (its BLOB_MAX was 39072): rfm1cs_file_unpack reads it */
+    @Test fun theOldReaderRefusedTheLargestBlobs() {
+        val f = codec.pack(listOf(MoveProject(0, ByteArray(39200), 0)), MoveProjects.KIND_ONE)
+        try { codec.unpack(f); fail("accepted") } catch (e: IllegalArgumentException) {
+            assertEquals("Not a Move project file: project 1 is 39200 bytes.", e.message)
         }
-    }
-
-    @Test fun theWebsRefusals() {
-        val good = MoveProjects.packFile(listOf(MoveProject(0, blob(1), 0)))
-        refused(null, "nothing to read")
-        refused(byteArrayOf(1, 2, 3), "does not start with RMVP")
-        refused(good.copyOf().also { it[4] = 2 }, "version 2")
-        refused(good.copyOf().also { it[5] = 3 }, "kind 3")
-        refused(good.copyOf().also { it[6] = 2 }, "2 projects")
-        refused(good.copyOf().also { it[8] = 40 }, "out of range")
-        refused(good.copyOf(good.size - 1), "cut off")
-        refused(good + byteArrayOf(0), "1 bytes after the last project")
-        refused(good, "damaged") { -1 }
-        val two = MoveProjects.packFile(listOf(MoveProject(4, blob(1), 0), MoveProject(4, blob(2), 0)))
-        refused(two, "twice")
-        refused(ByteArray(MoveProjects.MAX_FILE + 1).also { MoveProjects.MAGIC.copyInto(it) }, "more than a full set")
     }
 
     @Test fun colourAndItsCheck() {
@@ -111,7 +168,7 @@ class MoveProjectsTest {
 
     @Test fun storeOneFileASlot() {
         val dir = Files.createTempDirectory("move").toFile()
-        val s = MoveProjects(dir, ok)
+        val s = MoveProjects(dir, codec)
         assertTrue(s.list().isEmpty())
         s.put(0, blob(1), 1_600_000_000_000L)
         s.put(31, blob(2))
@@ -120,7 +177,7 @@ class MoveProjectsTest {
         assertTrue(File(dir, "move-project-01.rfmmove").isFile)
         assertTrue(File(dir, "move-project-32.rfmmove").isFile)
         // each file is the web's one-project file, so it imports anywhere as it is
-        val u = MoveProjects.unpackFile(File(dir, "move-project-01.rfmmove").readBytes(), ok)
+        val u = codec.unpack(File(dir, "move-project-01.rfmmove").readBytes())
         assertEquals(0, u.entries[0].slot)
         assertEquals(1_600_000_000_000L, s.get(0)!!.saved)
         s.put(0, blob(3))

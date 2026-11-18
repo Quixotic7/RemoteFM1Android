@@ -6,19 +6,24 @@
 // Input to actions (a pad plays an FM-1 key with its velocity, a button by label, a knob a detent every two ticks,
 // a Track tap changes the mode), the LEDs and the screen out, the sequencer's notes into the firmware on the beat (the
 // caller's device clock, and the audio clock's frames through the render-ahead ring), the metronome mixed into the
-// output, Sample's take cut on bar lines, the projects' requests answered, a lost link tried again.
+// output, Sample's take cut on bar lines, the projects' requests answered, a lost link tried again (a stale try's
+// close ignored), the project file (rfm1cs_file_*: byte for byte the golden files Android's own writer made; a blob of
+// the core's 39200-byte maximum read).
 package com.quixotic7.remotefm1.move
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.quixotic7.remotefm1.RfmEngine
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.fail
 import org.junit.Assert.assertTrue
 import android.os.SystemClock
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 import kotlin.math.abs
 
 @RunWith(AndroidJUnit4::class)
@@ -158,7 +163,9 @@ class MoveCoreTest {
         step(5)
         val st = MoveNative.status(h)
         assertEquals(MoveNative.RETRYING, st.state)
-        assertTrue("the text: ${st.text}", st.text.startsWith("Link lost"))
+        assertEquals("The link closed: trying again in 1 s...", st.text)       // (rfm1cs_status_text's words)
+        assertEquals(MoveNative.TONE_BUSY, st.tone)
+        assertEquals("Test: link lost (the link closed).", st.toast)
         assertTrue("flushed on lost", drainRequests().any { it[0] == MoveNative.REQ_PROJECT_SAVE })
         val t0 = SystemClock.elapsedRealtime()
         await("the retry", 4000) { MoveNative.status(h).state == MoveNative.CONNECTED }
@@ -166,6 +173,106 @@ class MoveCoreTest {
         assertEquals(2, MoveNative.status(h).connects)
         assertEquals("Sequencer mode kept", 3, MoveNative.status(h).mode)
         assertTrue("every LED again", leds().size >= 48)
+        assertTrue(MoveNative.status(h).text, MoveNative.status(h).text.startsWith("Test connected over this computer (TCP): Sequencer mode."))
+    }
+
+    /** a close from an older try's socket (EV_OPEN's attempt id) is ignored; the current try's is a loss */
+    @Test fun aStaleTrysCloseIsIgnored() {
+        setup()
+        val a1 = MoveNative.status(h).attempt
+        assertTrue(a1 != 0)
+        MoveNative.testConnected(h, false)
+        step(5)
+        assertEquals(MoveNative.RETRYING, MoveNative.status(h).state)
+        await("the retry", 4000) { MoveNative.status(h).state == MoveNative.CONNECTED }
+        val a2 = MoveNative.status(h).attempt
+        assertTrue("a new try: $a1 -> $a2", a2 != a1)
+        MoveNative.testClose(h, a1)                     // the first socket closing late
+        step(20)
+        assertEquals(MoveNative.CONNECTED, MoveNative.status(h).state)
+        assertEquals(2, MoveNative.status(h).connects)
+        MoveNative.testClose(h, a2)
+        step(5)
+        assertEquals(MoveNative.RETRYING, MoveNative.status(h).state)
+    }
+
+    private fun asset(name: String): ByteArray =
+        InstrumentationRegistry.getInstrumentation().context.assets.open("rmvp/$name").use { it.readBytes() }
+
+    /** rfm1cs_file_pack / _unpack (MoveNative.FileCodec) write and read exactly the files Android's own Kotlin wrote
+     *  (assets/rmvp: rfm1cs-abletonmove tests/rmvp; MoveTest's KotlinRmvp makes the same bytes on the JVM) */
+    @Test fun theProjectFileIsTheSharedOne() {
+        val a = asset("blob_a.bin")
+        val b = asset("blob_b.bin")
+        assertEquals(0, MoveNative.projectCheck(a))
+        val c = MoveNative.FileCodec
+        val one = asset("android.rfmmove")
+        val set = asset("android.rfmmoveset")
+        assertArrayEquals(one, c.pack(listOf(MoveProject(3, a, 1_794_909_600_000L)), MoveProjects.KIND_ONE))
+        assertArrayEquals(one, c.pack(listOf(MoveProject(3, a, 1_794_909_600_000L))))
+        assertArrayEquals(set, c.pack(listOf(MoveProject(0, a, 1_794_909_600_000L), MoveProject(5, b, 1_794_990_615_000L))))
+        val u = c.unpack(set)
+        assertEquals(MoveProjects.KIND_SET, u.kind)
+        assertEquals(listOf(0, 5), u.entries.map { it.slot })
+        assertEquals(listOf(1_794_909_600_000L, 1_794_990_615_000L), u.entries.map { it.saved })
+        assertArrayEquals(a, u.entries[0].bytes)
+        assertArrayEquals(b, u.entries[1].bytes)
+        assertArrayEquals(set, c.pack(u.entries))
+        // saved 0 (unknown): read as now
+        val t0 = System.currentTimeMillis()
+        assertTrue(c.unpack(c.pack(listOf(MoveProject(1, a, 0)))).entries[0].saved >= t0)
+        // the store's file for a slot is that file (files/move/move-project-NN.rfmmove)
+        val dir = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "move-file-test").apply { deleteRecursively(); mkdirs() }
+        val store = MoveProjects(dir, c)
+        store.put(3, a, 1_794_909_600_000L)
+        assertArrayEquals(one, File(dir, "move-project-04.rfmmove").readBytes())
+        assertArrayEquals(a, store.get(3)!!.bytes)
+        dir.deleteRecursively()
+        // refused, in the web player's words (this app)
+        fun refused(f: ByteArray?, says: String) {
+            try { c.unpack(f); fail("accepted: $says") } catch (e: IllegalArgumentException) { assertEquals(says, e.message) }
+        }
+        refused(null, "Not a Move project file: nothing to read.")
+        refused(byteArrayOf(1, 2, 3), "Not a Move project file: it does not start with RMVP.")
+        refused(one.copyOf().also { it[4] = 2 }, "Not a Move project file: version 2; this app reads version 1.")
+        refused(one.copyOf().also { it[5] = 3 }, "Not a Move project file: kind 3.")
+        refused(one.copyOf().also { it[6] = 2 }, "Not a Move project file: 2 projects.")
+        refused(one.copyOf().also { it[8] = 40 }, "Not a Move project file: slot 41 out of range.")
+        refused(one.copyOf(one.size - 1), "Not a Move project file: project 1 is cut off.")
+        refused(one + byteArrayOf(0), "Not a Move project file: 1 bytes after the last project.")
+        refused(one.copyOf().also { it[40] = (it[40].toInt() xor 0x55).toByte() }, "Not a Move project file: project 1 (slot 4) is damaged.")
+        refused(c.pack(listOf(MoveProject(4, a, 0), MoveProject(4, b, 0))), "Not a Move project file: slot 5 twice.")
+        refused(ByteArray(8 + 32 * (10 + 39200) + 1).also { byteArrayOf(0x52, 0x4d, 0x56, 0x50).copyInto(it) },
+            "Not a Move project file: it is 1254729 bytes, more than a full set (1254728).")
+    }
+
+    /** the largest project the core makes (4096 notes, 2048 CC locks: RFM_MOVE_PROJECT_MAX, 39200 bytes) is a valid
+     *  blob, and its file is written and read (the old Kotlin reader stopped at 39072) */
+    @Test fun aFullProjectOf39200Bytes() {
+        val empty = MoveNative.testEmptyProject()!!
+        val offNotes = 24 + 16 * 4 + 256 * 2                // (project.c OFF_NOTES: the note count, then the notes)
+        assertEquals(0, (empty[offNotes].toInt() and 255) or (empty[offNotes + 1].toInt() shl 8))
+        val o = java.io.ByteArrayOutputStream()
+        o.write(empty, 0, offNotes)
+        o.write(byteArrayOf(0x00, 0x10))                    // 4096 notes: clip, step, note, vel, micro, len16
+        for (i in 0 until 4096) o.write(byteArrayOf((i / 256).toByte(), (i % 256).toByte(), 60, 100, 0, 24, 0))
+        o.write(byteArrayOf(0x00, 0x08))                    // 2048 locks: clip, step, cc, value
+        for (i in 0 until 2048) o.write(byteArrayOf((i / 256).toByte(), (i % 256).toByte(), 1, 64))
+        o.write(empty, offNotes + 4, empty.size - offNotes - 4)   // (the extension, the check)
+        val full = MoveProjects.withColor(o.toByteArray(), empty[18].toInt())   // (the FNV-1a made again)
+        assertEquals(39200, full.size)
+        assertEquals(MoveNative.projectMax, full.size)
+        assertEquals(0, MoveNative.projectCheck(full))
+        val f = MoveNative.FileCodec.pack(listOf(MoveProject(9, full, 1_794_909_600_000L)))
+        assertEquals(8 + 10 + 39200, f.size)
+        assertArrayEquals(full, MoveNative.FileCodec.unpack(f).entries[0].bytes)
+        val dir = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "move-full-test").apply { deleteRecursively(); mkdirs() }
+        val store = MoveProjects(dir, MoveNative.FileCodec)
+        store.put(9, full)
+        assertArrayEquals(full, store.get(9)!!.bytes)
+        dir.deleteRecursively()
+        // one byte more is not a project
+        assertTrue(MoveNative.projectCheck(full + byteArrayOf(0)) != 0)
     }
 
     /** PROJECT_LOAD answered with a blob that is not a project: an empty project there (Android's behaviour) */

@@ -68,6 +68,8 @@ class MoveE2eTest {
             assertTrue("connected: ${st.text}", connected)
             assertEquals(MoveNative.CONNECTED, st.state)
             assertTrue("the simulator's name", st.name.isNotEmpty())
+            assertTrue("the line: ${st.text}", st.text.startsWith("${st.name} connected over ") &&
+                st.text.endsWith("(TCP): Sequencer mode. Track 1..4 pick the mode."))
             assertTrue("a pad played key 0", keyZero)
             assertTrue("LEDs written: ${st.leds}", st.leds >= 48)
             assertTrue("screens sent: ${st.screens}", st.screens >= 2)
