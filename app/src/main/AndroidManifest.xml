@@ -24,6 +24,13 @@
     <!-- (A4) Get firmware: remotefm1.com's catalog and the RemoteFM1FW releases on GitHub -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- the Ableton Move (Settings › Ableton Move): Move Remote over the local network (TCP 7720); move.local asked of
+         the network with an mDNS question, which needs the Wi-Fi multicast lock. Android 16's local-network
+         permission (ACCESS_LOCAL_NETWORK) is not enforced for target 36 yet: add it when it is -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
     <!-- (ain1) a firmware's audio input: asked only when the user turns it on (Firmware page, Audio input) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 

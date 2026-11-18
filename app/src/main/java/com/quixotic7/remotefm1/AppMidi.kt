@@ -7,6 +7,8 @@
 // preferences), the controllers' input (ControllerInput: never the FM-1, never the OMX-27 while it is in remote mode),
 // MIDI learn on the faceplate (MidiLearnMode) and the OMX-27 (OmxLink, its target the same PanelFeed through
 // PanelOmxTarget). A web manager's MIDI: managerAttach / managerSend / managerTake. The main thread.
+// The Ableton Move (move/MoveLink.kt): its core on the engine's core thread, its projects in files/move, Sample's takes
+// in files/move/takes, its settings in the preferences.
 package com.quixotic7.remotefm1
 
 import android.content.Context
@@ -46,6 +48,7 @@ class AppMidi(ctx: Context, private val engine: RfmEngine, private val link: Rfm
     val learn = MidiLearnMode(feed, learnEngine, store)
     val omxTarget = PanelOmxTarget(feed)
     val omx: OmxLink
+    val move: com.quixotic7.remotefm1.move.MoveLink
 
     init {
         store.follow { e, sp -> engine.setMidiMap(e, sp) }
@@ -64,6 +67,8 @@ class AppMidi(ctx: Context, private val engine: RfmEngine, private val link: Rfm
         omx.onToast = { t, ok -> feed.toast.show(t, if (ok) ToastCenter.Tone.OK else ToastCenter.Tone.NEUTRAL) }
         feed.onKnobTouched = { omx.knobUsed(it) }
         omx.auto()
+        move = makeMove(ctx)
+        move.auto()
     }
 
     // ---------------------------------------------------------------- the settings (iOS CorePlayer.midiSettings)
@@ -86,8 +91,39 @@ class AppMidi(ctx: Context, private val engine: RfmEngine, private val link: Rfm
         learn.start(ui)
     }
 
-    /** the app going away: the OMX's LEDs and screen cleared */
-    fun willClose() = omx.willClose()
+    /** the app going away: the OMX's LEDs and screen cleared, the Move's project saved */
+    fun willClose() { omx.willClose(); move.flush() }
+
+    private fun makeMove(ctx: Context): com.quixotic7.remotefm1.move.MoveLink {
+        val p = object : com.quixotic7.remotefm1.move.MovePrefs {
+            override fun string(key: String) = prefs.getString(key, null)
+            override fun setString(key: String, v: String?) = prefs.edit().putString(key, v).apply()
+            override fun bool(key: String) = prefs.getBoolean(key, false)
+            override fun setBool(key: String, v: Boolean) = prefs.edit().putBoolean(key, v).apply()
+            override fun int(key: String, def: Int) = prefs.getInt(key, def)
+            override fun setInt(key: String, v: Int) = prefs.edit().putInt(key, v).apply()
+        }
+        val dir = java.io.File(ctx.filesDir, "move")
+        val app = ctx.applicationContext
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        // move.local: an mDNS question of our own, under a multicast lock (Android's resolver may not answer .local)
+        val mdns: (String) -> String? = { name ->
+            val wifi = app.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+            val lock = wifi?.createMulticastLock("RemoteFM1 Move")?.apply { setReferenceCounted(false); acquire() }
+            try { com.quixotic7.remotefm1.move.MoveMdns.resolve(name) } finally { lock?.release() }
+        }
+        val m = com.quixotic7.remotefm1.move.MoveLink(
+            attach = { engine.moveAttach(it) },
+            settings = com.quixotic7.remotefm1.move.MoveSettings(p),
+            projects = com.quixotic7.remotefm1.move.MoveProjects(dir) { com.quixotic7.remotefm1.move.MoveNative.projectCheck(it) },
+            takes = com.quixotic7.remotefm1.move.MoveTakes(java.io.File(dir, "takes")),
+            mdns = mdns,
+            main = { f -> handler.post(f) },
+        )
+        m.log = { android.util.Log.i("RFMMove", it) }
+        m.onToast = { t, ok -> feed.toast.show(t, if (ok) ToastCenter.Tone.OK else ToastCenter.Tone.NEUTRAL) }
+        return m
+    }
 
     /** -demomap (screenshots): a few mappings, as if learned */
     fun demoMap() {

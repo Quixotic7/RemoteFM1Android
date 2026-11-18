@@ -425,6 +425,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
 
     /** the app goes to the background (MainActivity.onStop): the flash saved now, the clock left running */
     fun didEnterBackground() {
+        midi.move.flush()                                       // (the Move's open project saved)
         if (booted == null) return
         val clock = engine.status().optInt("clock")
         flash.saveNow(main, clock == RfmEngine.CLOCK_AUDIO || clock == RfmEngine.CLOCK_TIMER) { ok ->

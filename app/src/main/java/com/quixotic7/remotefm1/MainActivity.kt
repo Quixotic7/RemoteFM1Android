@@ -151,6 +151,16 @@ class MainActivity : ComponentActivity() {
         if (uris.isEmpty()) return
         when (picking) {
             AppUi.PICK_BACKUP -> appUi.appData.restoreFrom(uris)
+            AppUi.PICK_MOVE -> {                        // (the Ableton Move's projects: into the first free slot / their own)
+                val move = model.midi.move
+                for (u in uris) {
+                    val r = runCatching { contentResolver.openInputStream(u)!!.use { it.readBytes() } }
+                        .mapCatching { move.importFile(it) }
+                    model.midi.feed.toast.show(r.fold({ s -> "Imported ${s.joinToString { "Project ${it + 1}" }}." },
+                        { e -> e.message ?: "Not imported." }),
+                        if (r.isSuccess) com.quixotic7.remotefm1.ui.faceplate.ToastCenter.Tone.OK else com.quixotic7.remotefm1.ui.faceplate.ToastCenter.Tone.NEUTRAL)
+                }
+            }
             AppUi.PICK_CART -> {
                 val slot = appUi.cartReplaceSlot
                 appUi.cartReplaceSlot = null

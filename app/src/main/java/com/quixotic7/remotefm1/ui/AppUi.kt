@@ -79,7 +79,8 @@ enum class SheetPageId(val raw: String) {
     FIRMWARE("firmware"), ABOUT("about"), STATES("states"), SAFETY("safetycopies"), GET_FIRMWARE("getfirmware"),
     MIDI("midi"), AUDIO_OUTPUT("audiooutput"), SETTINGS("settings"), INSTALL("install"), CART("cart"),
     MIDI_INPUT("midiinput"), KEY_CHANNEL("keychannel"), MIDI_MODE("midimode"),
-    TRANSFER("transfer");           // (F, iOS 9494ebe) From another device: an opened .rfm1transfer
+    TRANSFER("transfer"),
+    MOVE("move");                   // (the Ableton Move: Settings › Ableton Move, MoveSheet.kt)           // (F, iOS 9494ebe) From another device: an opened .rfm1transfer
 
     companion object { fun of(s: String?) = entries.firstOrNull { it.raw == s } }
 }
@@ -248,5 +249,6 @@ class AppUi(ctx: Context, val model: AppModel, val launch: UiLaunch) {
         const val PICK_FIRMWARE = "firmware"
         const val PICK_BACKUP = "backup"
         const val PICK_CART = "cart"
+        const val PICK_MOVE = "move"            // (the Ableton Move's projects: .rfmmove / .rfmmoveset)
     }
 }

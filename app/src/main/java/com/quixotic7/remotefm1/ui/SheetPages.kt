@@ -109,6 +109,7 @@ fun SheetContent(a: AppUi) {
                 SheetPageId.MIDI_MODE -> MidiModePage(a)
                 SheetPageId.TRANSFER -> TransferPage(a)
                 SheetPageId.SETTINGS -> SettingsPage(a)
+                SheetPageId.MOVE -> MovePage(a)
                 SheetPageId.INSTALL -> a.fm1.installPage?.invoke { a.page = SheetPageId.SETTINGS }
                     ?: LaterPage("Install RemoteFM1", "Settings", "Installing RemoteFM1 on the FM-1 comes with milestone A7.") { a.page = SheetPageId.SETTINGS }
                 SheetPageId.CART -> a.fm1.cartPage?.invoke { a.page = if (a.cartBackTitle == "Firmware") SheetPageId.FIRMWARE else SheetPageId.SETTINGS }
@@ -632,6 +633,11 @@ private fun SettingsPage(a: AppUi) {
             SheetToggle("Step numbers on the keys", a.ui.stepNumbers, divider = false, tag = "toggle-steps") { a.useStepNumbers(it) }
         }
         SheetNote("Shows 1–16 on the lower keys, for a firmware in a step mode.")
+        SheetSectionTitle("Controllers")
+        SheetList {
+            SheetRow("Ableton Move", value = moveRowValue(a.model.midi.move), divider = false, tag = "row-move") { a.page = SheetPageId.MOVE }
+        }
+        SheetNote("An Ableton Move running Move Remote, over Wi-Fi, as this FM-1's controller and sequencer.")
         SheetSectionTitle("Diagnostics")
         SheetList {
             SheetRow("Diagnostics", divider = false, tag = "row-diagnostics") { a.overlay = Overlay.DIAGNOSTICS }
