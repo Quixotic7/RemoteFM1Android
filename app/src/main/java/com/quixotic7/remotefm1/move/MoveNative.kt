@@ -25,8 +25,18 @@ object MoveNative {
     const val REQ_PROJECT_COLOR = 16
     const val REQ_SAMPLE_START = 12
     const val REQ_SAMPLE_STOP = 112
+    // the firmware browser (rfm1cs-abletonmove 0.5.10, one firmware and no FX): data is the firmware's id
+    const val REQ_FW_LOAD = 17                  // slot 0, value: its index in the list
+    const val REQ_FW_UNLOAD = 18
+    const val REQ_FW_DOWNLOAD = 20
+    const val REQ_FW_LIBRARY = 21               // data: the library blob
+    const val REQ_FW_LEVEL = 22                 // slot 0, value 0..127
+    const val FW_FAILED = -1                    // fwProgress: RFM_MOVE_FW_FAILED, _BUSY ("Too busy")
+    const val FW_BUSY = -2
 
     val projectMax: Int by lazy { nativeProjectMax() }
+    /** the library blob's largest size (RFM_MOVE_FW_LIB_BYTES) */
+    val libraryMax: Int by lazy { nativeLibraryMax() }
 
     class Status(v: IntArray, nameText: String) {
         val state = v[0]
@@ -81,7 +91,8 @@ object MoveNative {
         }
     }
 
-    fun create(settings: ByteArray?): Long = nativeNew(settings)
+    /** the core and its session (one firmware, no FX: rfm_move_fw_caps 0); settings and library as stored (null: none) */
+    fun create(settings: ByteArray?, library: ByteArray? = null): Long = nativeNew(settings, library)
     fun free(h: Long) = nativeFree(h)
     /** connects (and again while wanted); host: "address", "address:port" or "[v6]:port" (rfm1cs_tcp_connect's);
      *  shown: the address the status texts name (blank: host) */
@@ -100,6 +111,25 @@ object MoveNative {
     fun testEmptyProject(): ByteArray? = nativeTestEmptyProject()
     fun takeAudio(h: Long, stereo: ShortArray): Int = nativeTakeAudio(h, stereo)
 
+    /** the Move's firmware browser: the whole catalog (a new list each time; the core keeps it until the next) */
+    fun fwList(h: Long, l: List<MoveFw>) {
+        val meta = ByteArray(3 * l.size)
+        l.forEachIndexed { i, e ->
+            meta[3 * i] = e.cats.toByte(); meta[3 * i + 1] = e.cat.toByte(); meta[3 * i + 2] = if (e.virt) 1 else 0
+        }
+        nativeFwList(h, Array(l.size) { l[it].id }, Array(l.size) { l[it].name }, Array(l.size) { l[it].version },
+            Array(l.size) { l[it].installed }, Array(l.size) { l[it].desc }, Array(l.size) { l[it].thumb }, meta)
+    }
+    /** a download landed: that entry's installed version (null: removed) */
+    fun fwInstalled(h: Long, id: String, version: String?) = nativeFwInstalled(h, id, version)
+    /** what slot 0 holds now (null: nothing) */
+    fun fwSlot(h: Long, id: String?) = nativeFwSlot(h, id)
+    /** a load's or download's progress 0..100 (100 done), [FW_FAILED], [FW_BUSY] */
+    fun fwProgress(h: Long, id: String, pct: Int) = nativeFwProgress(h, id, pct)
+    /** (tests) the core's firmware state: "caps active track slot0 n", then "id|version|installed|cats|cat|virt|thumb"
+     *  a line (installed "-": none; thumb 1: given) */
+    fun testFw(h: Long): String = nativeTestFw(h)
+
     // tests: a fake Move in place of the socket (it answers HELLO and sends a STATUS every 500 ms); down: the link cut
     // (lost, tried again in 1 s); testDrop: the real socket cut; testClose: a close from that try's socket (0: the
     // current one; an older try's is ignored)
@@ -114,7 +144,15 @@ object MoveNative {
     fun note(n: Int, vel: Int): Int = if (vel > 0) 0x09 or (0x90 shl 8) or (n shl 16) or (vel shl 24) else 0x08 or (0x80 shl 8) or (n shl 16)
     fun cc(n: Int, v: Int): Int = 0x0B or (0xB0 shl 8) or (n shl 16) or (v shl 24)
 
-    @JvmStatic private external fun nativeNew(settings: ByteArray?): Long
+    @JvmStatic private external fun nativeNew(settings: ByteArray?, library: ByteArray?): Long
+    @JvmStatic private external fun nativeLibraryMax(): Int
+    @JvmStatic private external fun nativeFwList(h: Long, ids: Array<String>, names: Array<String>, versions: Array<String>,
+                                                 installed: Array<String?>, descs: Array<String?>, thumbs: Array<ByteArray?>,
+                                                 meta: ByteArray)
+    @JvmStatic private external fun nativeFwInstalled(h: Long, id: String, version: String?)
+    @JvmStatic private external fun nativeFwSlot(h: Long, id: String?)
+    @JvmStatic private external fun nativeFwProgress(h: Long, id: String, pct: Int)
+    @JvmStatic private external fun nativeTestFw(h: Long): String
     @JvmStatic private external fun nativeFree(h: Long)
     @JvmStatic private external fun nativeStart(h: Long, host: String, shown: String)
     @JvmStatic private external fun nativeStop(h: Long)

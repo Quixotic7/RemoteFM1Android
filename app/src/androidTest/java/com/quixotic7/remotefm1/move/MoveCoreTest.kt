@@ -8,7 +8,7 @@
 // caller's device clock, and the audio clock's frames through the render-ahead ring), the metronome mixed into the
 // output, Sample's take cut on bar lines, the projects' requests answered, a lost link tried again (a stale try's
 // close ignored), the project file (rfm1cs_file_*: byte for byte the golden files Android's own writer made; a blob of
-// the core's 39200-byte maximum read).
+// the core's 40136-byte maximum read).
 package com.quixotic7.remotefm1.move
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -242,13 +242,13 @@ class MoveCoreTest {
         refused(one + byteArrayOf(0), "Not a Move project file: 1 bytes after the last project.")
         refused(one.copyOf().also { it[40] = (it[40].toInt() xor 0x55).toByte() }, "Not a Move project file: project 1 (slot 4) is damaged.")
         refused(c.pack(listOf(MoveProject(4, a, 0), MoveProject(4, b, 0))), "Not a Move project file: slot 5 twice.")
-        refused(ByteArray(8 + 32 * (10 + 39200) + 1).also { byteArrayOf(0x52, 0x4d, 0x56, 0x50).copyInto(it) },
-            "Not a Move project file: it is 1254729 bytes, more than a full set (1254728).")
+        refused(ByteArray(8 + 32 * (10 + MoveNative.projectMax) + 1).also { byteArrayOf(0x52, 0x4d, 0x56, 0x50).copyInto(it) },
+            "Not a Move project file: it is 1284681 bytes, more than a full set (1284680).")   // (0.5.0: 40136 a project)
     }
 
-    /** the largest project the core makes (4096 notes, 2048 CC locks: RFM_MOVE_PROJECT_MAX, 39200 bytes) is a valid
-     *  blob, and its file is written and read (the old Kotlin reader stopped at 39072) */
-    @Test fun aFullProjectOf39200Bytes() {
+    /** the largest project the core makes (4096 notes, 2048 CC locks: RFM_MOVE_PROJECT_MAX, 40136 bytes since 0.5.0's
+     *  version 6) is a valid blob, and its file is written and read (the old Kotlin reader stopped at 39072) */
+    @Test fun aFullProjectOf40136Bytes() {
         val empty = MoveNative.testEmptyProject()!!
         val offNotes = 24 + 16 * 4 + 256 * 2                // (project.c OFF_NOTES: the note count, then the notes)
         assertEquals(0, (empty[offNotes].toInt() and 255) or (empty[offNotes + 1].toInt() shl 8))
@@ -260,11 +260,11 @@ class MoveCoreTest {
         for (i in 0 until 2048) o.write(byteArrayOf((i / 256).toByte(), (i % 256).toByte(), 1, 64))
         o.write(empty, offNotes + 4, empty.size - offNotes - 4)   // (the extension, the check)
         val full = MoveProjects.withColor(o.toByteArray(), empty[18].toInt())   // (the FNV-1a made again)
-        assertEquals(39200, full.size)
+        assertEquals(40136, full.size)
         assertEquals(MoveNative.projectMax, full.size)
         assertEquals(0, MoveNative.projectCheck(full))
         val f = MoveNative.FileCodec.pack(listOf(MoveProject(9, full, 1_794_909_600_000L)))
-        assertEquals(8 + 10 + 39200, f.size)
+        assertEquals(8 + 10 + 40136, f.size)
         assertArrayEquals(full, MoveNative.FileCodec.unpack(f).entries[0].bytes)
         val dir = File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "move-full-test").apply { deleteRecursively(); mkdirs() }
         val store = MoveProjects(dir, MoveNative.FileCodec)

@@ -105,7 +105,7 @@ class KotlinRmvp(private val check: (ByteArray) -> Int = { 0 }) : MoveFileCodec 
 
     companion object {
         const val SLOTS = 32
-        const val BLOB_MAX = 39072                  // (the stale copy: RFM_MOVE_PROJECT_MAX is 39200)
+        const val BLOB_MAX = 39072                  // (the stale copy: RFM_MOVE_PROJECT_MAX was 39200, 40136 since 0.5.0)
         val MAGIC = byteArrayOf(0x52, 0x4d, 0x56, 0x50)
         const val FILE_VERSION = 1
         const val KIND_ONE = 1

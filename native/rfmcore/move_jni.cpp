@@ -28,16 +28,36 @@ std::vector<uint8_t> bytes(JNIEnv *env, jbyteArray a)
     return v;
 }
 const uint8_t *ptr(const std::vector<uint8_t> &v) { return v.empty() ? nullptr : v.data(); }
+std::string str(JNIEnv *env, jstring j, bool *has = nullptr)
+{
+    if (has)
+        *has = j != nullptr;
+    if (!j)
+        return {};
+    const char *c = env->GetStringUTFChars(j, nullptr);
+    std::string s = c ? c : "";
+    env->ReleaseStringUTFChars(j, c);
+    return s;
+}
+std::string strAt(JNIEnv *env, jobjectArray a, jsize i, bool *has = nullptr)
+{
+    jstring j = (jstring)env->GetObjectArrayElement(a, i);
+    std::string s = str(env, j, has);
+    if (j)
+        env->DeleteLocalRef(j);
+    return s;
+}
 } // namespace
 
 #define F(name) Java_com_quixotic7_remotefm1_move_MoveNative_##name
 
 extern "C" {
 
-JNIEXPORT jlong JNICALL F(nativeNew)(JNIEnv *env, jclass, jbyteArray settings)
+// settings: the stored image (null: defaults); library: the stored FW_LIBRARY blob (null: an empty library)
+JNIEXPORT jlong JNICALL F(nativeNew)(JNIEnv *env, jclass, jbyteArray settings, jbyteArray library)
 {
-    const std::vector<uint8_t> s = bytes(env, settings);
-    return (jlong)rfmm_new(ptr(s), (uint32_t)s.size(), "RemoteFM1 Android");
+    const std::vector<uint8_t> s = bytes(env, settings), l = bytes(env, library);
+    return (jlong)rfmm_new_lib(ptr(s), (uint32_t)s.size(), ptr(l), (uint32_t)l.size(), "RemoteFM1 Android");
 }
 
 JNIEXPORT void JNICALL F(nativeFree)(JNIEnv *, jclass, jlong h) { rfmm_free(mv(h)); }
@@ -184,6 +204,70 @@ JNIEXPORT jbyteArray JNICALL F(nativeTestEmptyProject)(JNIEnv *env, jclass)
     jbyteArray a = env->NewByteArray(n);
     env->SetByteArrayRegion(a, 0, n, reinterpret_cast<const jbyte *>(b.data()));
     return a;
+}
+
+// ---- the firmware browser (rfmm_fw_*): the catalog as parallel arrays (installed / desc / thumb entries may be null;
+// meta: cats, cat, virt per entry)
+
+JNIEXPORT void JNICALL F(nativeFwList)(JNIEnv *env, jclass, jlong h, jobjectArray ids, jobjectArray names,
+                                       jobjectArray versions, jobjectArray installed, jobjectArray descs,
+                                       jobjectArray thumbs, jbyteArray meta)
+{
+    const jsize n = env->GetArrayLength(ids);
+    const std::vector<uint8_t> mt = bytes(env, meta);
+    if (env->GetArrayLength(names) < n || env->GetArrayLength(versions) < n || env->GetArrayLength(installed) < n ||
+        env->GetArrayLength(descs) < n || env->GetArrayLength(thumbs) < n || (jsize)mt.size() < 3 * n)
+        return;
+    struct Own { std::string id, name, version, inst, desc; bool hasInst, hasDesc; std::vector<uint8_t> thumb; };
+    std::vector<Own> own((size_t)n);
+    std::vector<rfmm_fw_t> e((size_t)n);
+    for (jsize i = 0; i < n; i++) {
+        Own &o = own[(size_t)i];
+        o.id = strAt(env, ids, i);
+        o.name = strAt(env, names, i);
+        o.version = strAt(env, versions, i);
+        o.inst = strAt(env, installed, i, &o.hasInst);
+        o.desc = strAt(env, descs, i, &o.hasDesc);
+        jbyteArray t = (jbyteArray)env->GetObjectArrayElement(thumbs, i);
+        o.thumb = bytes(env, t);
+        if (t)
+            env->DeleteLocalRef(t);
+        if (o.thumb.size() != 512)
+            o.thumb.clear();
+        e[(size_t)i] = rfmm_fw_t{o.id.c_str(), o.name.c_str(), o.version.c_str(), o.hasInst ? o.inst.c_str() : nullptr,
+                                 o.hasDesc ? o.desc.c_str() : nullptr, o.thumb.empty() ? nullptr : o.thumb.data(),
+                                 mt[(size_t)(3 * i)], mt[(size_t)(3 * i + 1)], mt[(size_t)(3 * i + 2)]};
+    }
+    rfmm_fw_list(mv(h), e.empty() ? nullptr : e.data(), (int)n);
+}
+
+JNIEXPORT void JNICALL F(nativeFwInstalled)(JNIEnv *env, jclass, jlong h, jstring id, jstring version)
+{
+    bool has = false;
+    const std::string i = str(env, id), v = str(env, version, &has);
+    rfmm_fw_installed(mv(h), i.c_str(), has ? v.c_str() : nullptr);
+}
+
+JNIEXPORT void JNICALL F(nativeFwSlot)(JNIEnv *env, jclass, jlong h, jstring id)
+{
+    const std::string i = str(env, id);
+    rfmm_fw_slot(mv(h), i.c_str());
+}
+
+JNIEXPORT void JNICALL F(nativeFwProgress)(JNIEnv *env, jclass, jlong h, jstring id, jint pct)
+{
+    const std::string i = str(env, id);
+    rfmm_fw_progress(mv(h), i.c_str(), pct);
+}
+
+JNIEXPORT jint JNICALL F(nativeLibraryMax)(JNIEnv *, jclass) { return (jint)rfmm_library_max(); }
+
+JNIEXPORT jstring JNICALL F(nativeTestFw)(JNIEnv *env, jclass, jlong h)
+{
+    const int n = rfmm_test_fw(mv(h), nullptr, 0);
+    std::vector<char> b((size_t)n + 1);
+    rfmm_test_fw(mv(h), b.data(), (uint32_t)b.size());
+    return env->NewStringUTF(b.data());
 }
 
 JNIEXPORT jint JNICALL F(nativeTakeAudio)(JNIEnv *env, jclass, jlong h, jshortArray stereo)

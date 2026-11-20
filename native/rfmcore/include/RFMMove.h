@@ -37,7 +37,24 @@ enum {
     // frames, all in rfmm_take_audio's queue by then)
     RFMM_REQ_SAMPLE_START = 12,
     RFMM_REQ_SAMPLE_STOP = 112,
+    // (Android) the firmware browser (rfm1cs-abletonmove 0.5.10, one firmware, no FX): data is the firmware's id
+    RFMM_REQ_FW_LOAD = 17,          // slot (0), value: its catalog index: load it, then rfmm_fw_progress 100 (or
+                                    // RFMM_FW_FAILED) and rfmm_fw_slot
+    RFMM_REQ_FW_UNLOAD = 18,        // slot (0): unload it, then rfmm_fw_slot(NULL)
+    RFMM_REQ_FW_DOWNLOAD = 20,      // download or update it: rfmm_fw_progress meanwhile, then rfmm_fw_installed
+    RFMM_REQ_FW_LIBRARY = 21,       // data: the library blob, to keep (give it back to rfmm_new_lib)
+    RFMM_REQ_FW_LEVEL = 22,         // slot (0), value 0..127: its level
 };
+enum { RFMM_FW_FAILED = -1, RFMM_FW_BUSY = -2 };    // rfmm_fw_progress: RFM_MOVE_FW_FAILED / _BUSY
+
+// (Android) a catalog entry (rfm_move_fw_t's fields; copied by rfmm_fw_list): installed NULL not here; desc NULL
+// none; thumb 512 bytes (64 x 64, 1 bit, rows top first, MSB left) or NULL; cats RFM_MOVE_CAT_* bits; cat 0..4 or
+// 255; virt 1: a Fantasy CFW
+typedef struct {
+    const char *id, *name, *version, *installed, *desc;
+    const uint8_t *thumb;
+    uint8_t cats, cat, virt;
+} rfmm_fw_t;
 
 typedef struct {
     int state;                      // RFMM_*
@@ -64,6 +81,9 @@ typedef struct {
 } rfmm_request_t;
 
 rfmm_t *rfmm_new(const uint8_t *settings, uint32_t n, const char *host_name);   // settings: NULL for the defaults
+// (Android) as rfmm_new, with the stored library blob (RFMM_REQ_FW_LIBRARY's bytes; NULL: an empty one). The core
+// runs as a single-firmware, no-FX host (rfm_move_fw_caps 0)
+rfmm_t *rfmm_new_lib(const uint8_t *settings, uint32_t n, const uint8_t *library, uint32_t lib_n, const char *host_name);
 void rfmm_free(rfmm_t *m);
 void rfmm_start(rfmm_t *m, const char *host);      // NULL or "": move.local; "host:port", "[v6]:port" too
 // (Android) host as rfmm_start; shown: the address in the status texts (the typed name while host is mDNS's answer)
@@ -84,6 +104,17 @@ uint32_t rfmm_project_max(void);
 uint32_t rfmm_settings_bytes(void);
 // (tests) a new, empty project's blob, as the core saves it: its bytes, or -1 (cap too small)
 int rfmm_test_empty_project(uint8_t *out, uint32_t cap);
+
+// ---- (Android) the firmware browser: the app's catalog (a new one whole; the entries copied), a download landed
+// (version NULL: removed), what slot 0 holds (NULL / "": empty), a load's or download's progress 0..100 or
+// RFMM_FW_FAILED / RFMM_FW_BUSY. Any thread: queued for the core's
+void rfmm_fw_list(rfmm_t *m, const rfmm_fw_t *entries, int n);
+void rfmm_fw_installed(rfmm_t *m, const char *id, const char *version);
+void rfmm_fw_slot(rfmm_t *m, const char *id);
+void rfmm_fw_progress(rfmm_t *m, const char *id, int pct);
+uint32_t rfmm_library_max(void);
+// (tests) the core's firmware state as text (MoveLink::testFw): its length (copied up to cap - 1, NUL-terminated)
+int rfmm_test_fw(rfmm_t *m, char *out, uint32_t cap);
 
 // (RFMEngine) the Move's core runs on this engine's core thread; NULL detaches it
 void rfme_attach_move(rfme_t *e, rfmm_t *m);

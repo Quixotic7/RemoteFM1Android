@@ -21,7 +21,12 @@ static std::vector<uint8_t> bytes(const uint8_t *b, uint32_t n) { return b && n 
 
 rfmm_t *rfmm_new(const uint8_t *settings, uint32_t n, const char *host_name)
 {
-    return reinterpret_cast<rfmm_t *>(new MoveLink(settings, n, host_name ? host_name : "RemoteFM1"));
+    return rfmm_new_lib(settings, n, nullptr, 0, host_name);
+}
+
+rfmm_t *rfmm_new_lib(const uint8_t *settings, uint32_t n, const uint8_t *library, uint32_t lib_n, const char *host_name)
+{
+    return reinterpret_cast<rfmm_t *>(new MoveLink(settings, n, library, lib_n, host_name ? host_name : "RemoteFM1"));
 }
 
 void rfmm_free(rfmm_t *m) { delete L(m); }
@@ -93,6 +98,44 @@ int rfmm_test_empty_project(uint8_t *out, uint32_t cap)
     const int n = rfm_move_project_save(m, out, cap);
     std::free(m);
     return n;
+}
+
+// ---- (Android) the firmware browser
+void rfmm_fw_list(rfmm_t *m, const rfmm_fw_t *e, int n)
+{
+    std::vector<MoveLink::FwEntry> v(n > 0 ? (size_t)n : 0);
+    for (int i = 0; i < n; i++) {
+        MoveLink::FwEntry &o = v[(size_t)i];
+        o.id = e[i].id ? e[i].id : "";
+        o.name = e[i].name ? e[i].name : "";
+        o.version = e[i].version ? e[i].version : "";
+        o.hasInstalled = e[i].installed != nullptr;
+        o.installed = e[i].installed ? e[i].installed : "";
+        o.hasDesc = e[i].desc != nullptr;
+        o.desc = e[i].desc ? e[i].desc : "";
+        if (e[i].thumb)
+            o.thumb.assign(e[i].thumb, e[i].thumb + RFM_MOVE_FW_THUMB_BYTES);
+        o.cats = e[i].cats, o.cat = e[i].cat, o.virt = e[i].virt;
+    }
+    L(m)->fwList(std::move(v));
+}
+
+void rfmm_fw_installed(rfmm_t *m, const char *id, const char *version)
+{
+    const std::string v = version ? version : "";
+    L(m)->fwInstalled(id ? id : "", version ? &v : nullptr);
+}
+
+void rfmm_fw_slot(rfmm_t *m, const char *id) { L(m)->fwSlot(id ? id : ""); }
+void rfmm_fw_progress(rfmm_t *m, const char *id, int pct) { L(m)->fwProgress(id ? id : "", pct); }
+uint32_t rfmm_library_max(void) { return RFM_MOVE_FW_LIB_BYTES; }
+
+int rfmm_test_fw(rfmm_t *m, char *out, uint32_t cap)
+{
+    const std::string s = L(m)->testFw();
+    if (cap)
+        std::snprintf(out, cap, "%s", s.c_str());
+    return (int)s.size();
 }
 
 // ---- (Android)

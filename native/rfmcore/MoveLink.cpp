@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -36,10 +37,16 @@ std::vector<uint8_t> framed(int type, const uint8_t *p, uint32_t n)
 }
 } // namespace
 
-MoveLink::MoveLink(const uint8_t *settings, uint32_t n, std::string hostName) : hostName_(std::move(hostName))
+MoveLink::MoveLink(const uint8_t *settings, uint32_t n, const uint8_t *library, uint32_t libN, std::string hostName)
+    : hostName_(std::move(hostName))
 {
-    s_ = static_cast<rfm1cs_session_t *>(std::calloc(1, sizeof(rfm1cs_session_t)));   // (~180 KB: not the stack)
+    s_ = static_cast<rfm1cs_session_t *>(std::calloc(1, sizeof(rfm1cs_session_t)));   // (not the stack)
     rfm1cs_session_init(s_, settings, n, hostName_.c_str(), onEvent, this);
+    // (0.5.10) one firmware, no FX: the web page's and the phone apps' host (RemoteFM14Move on the Move keeps three
+    // slots and FX). Before the catalog; then the stored library (favourites, colours, tags, slot 0 and its level)
+    rfm_move_fw_caps(&s_->core, 0);
+    if (library && libN && rfm_move_fw_library(&s_->core, library, libN) < 0)
+        rfm_move_fw_library(&s_->core, nullptr, 0);   // (not a library: an empty one)
     rfm1cs_session_give_up(s_, -1);             // (tries for ever while wanted, as before)
     lcd_.resize(240 * 240);
     audio_.resize(2 * kAudioFrames);
@@ -132,6 +139,55 @@ void MoveLink::projectAnswer(int slot, const std::vector<uint8_t> &blob)
 }
 
 void MoveLink::flushProject() { post(In(In::kFlush)); }
+
+// ---- the firmware browser: the catalog built here (any thread), handed to the driver whole
+void MoveLink::fwList(std::vector<FwEntry> &&entries)
+{
+    auto l = std::make_shared<FwList>();
+    l->src = std::move(entries);
+    l->arr.resize(l->src.size());
+    for (size_t i = 0; i < l->src.size(); i++) {      // (pointers into l->src: it never moves again)
+        const FwEntry &e = l->src[i];
+        rfm_move_fw_t &f = l->arr[i];
+        f.id = e.id.c_str();
+        f.name = e.name.c_str();
+        f.version = e.version.c_str();
+        f.installed = e.hasInstalled ? e.installed.c_str() : nullptr;
+        f.desc = e.hasDesc ? e.desc.c_str() : nullptr;
+        f.thumb = e.thumb.size() == RFM_MOVE_FW_THUMB_BYTES ? e.thumb.data() : nullptr;
+        f.cats = e.cats;
+        f.cat = e.cat;
+        f.virt = e.virt;
+    }
+    In m(In::kFwList);
+    m.fw = std::move(l);
+    post(std::move(m));
+}
+
+void MoveLink::fwInstalled(const std::string &id, const std::string *version)
+{
+    In m(In::kFwInstalled);
+    m.shown = id;
+    m.has = version != nullptr;
+    if (version)
+        m.bytes.assign(version->begin(), version->end());
+    post(std::move(m));
+}
+
+void MoveLink::fwSlot(const std::string &id)
+{
+    In m(In::kFwSlot);
+    m.shown = id;
+    post(std::move(m));
+}
+
+void MoveLink::fwProgress(const std::string &id, int pct)
+{
+    In m(In::kFwProgress);
+    m.shown = id;
+    m.slot = pct;
+    post(std::move(m));
+}
 
 // ------------------------------------------------------------------ the network thread ---
 // Opens and closes the socket when the session says (publish: openReq_ / closeReq_), reads into in_ tagged with the
@@ -282,6 +338,45 @@ void MoveLink::drive(uint32_t now, bool core)
             break;
         case In::kFlush:
             rfm1cs_session_flush(s_);
+            break;
+        case In::kFwList: {                     // (the old array freed after the core has the new one)
+            std::shared_ptr<FwList> old = std::move(fwList_);
+            fwList_ = std::move(m.fw);
+            rfm_move_fw_list(&s_->core, fwList_->arr.empty() ? nullptr : fwList_->arr.data(), (int)fwList_->arr.size());
+            old.reset();
+            rfm1cs_session_redraw(s_, now);
+            break;
+        }
+        case In::kFwInstalled:                  // (the string lives with the list: the core keeps the pointer)
+            if (fwList_) {
+                for (size_t i = 0; i < fwList_->src.size(); i++) {
+                    if (fwList_->src[i].id != m.shown)
+                        continue;
+                    const char *v = nullptr;
+                    if (m.has) {
+                        fwList_->installed.emplace_back(m.bytes.begin(), m.bytes.end());
+                        v = fwList_->installed.back().c_str();
+                    }
+                    rfm_move_fw_installed(&s_->core, (int)i, v);
+                    rfm1cs_session_redraw(s_, now);
+                    break;
+                }
+            }
+            break;
+        case In::kFwSlot: {                     // (one slot: ids past 0 are ignored)
+            const char *ids[RFM_MOVE_FW_SLOTS] = {m.shown.empty() ? nullptr : m.shown.c_str(), nullptr, nullptr};
+            rfm_move_fw_slots(&s_->core, ids);
+            if (m.shown.empty()) {              // (nothing plays: no button names; a load gives them again)
+                const char *none[RFM_MOVE_NBTN] = {};
+                rfm_move_set_button_names(&s_->core, none);
+                namesGen_ = 0;
+            }
+            rfm1cs_session_redraw(s_, now);
+            break;
+        }
+        case In::kFwProgress:
+            rfm_move_fw_progress(&s_->core, m.shown.c_str(), m.slot);
+            rfm1cs_session_redraw(s_, now);
             break;
         }
     }
@@ -455,6 +550,22 @@ void MoveLink::action(const rfm1cs_event_t &ev)
         request(std::move(r));
         return;
     }
+    case RFM_MOVE_ACT_FW_LOAD:                  // the firmware browser (one slot: FW_ACTIVE, FX_*, MIX, ROUTE never
+    case RFM_MOVE_ACT_FW_UNLOAD:                // come): for the app, the id in data
+    case RFM_MOVE_ACT_FW_DOWNLOAD:
+    case RFM_MOVE_ACT_FW_LEVEL:
+    case RFM_MOVE_ACT_FW_LIBRARY: {
+        Request r;
+        r.kind = a.kind, r.slot = a.slot, r.value = a.value;
+        if (a.kind == RFM_MOVE_ACT_FW_LIBRARY) {
+            if (ev.data && ev.len)
+                r.data.assign(ev.data, ev.data + ev.len);
+        } else if (a.data && a.len) {
+            r.data.assign(a.data, a.data + a.len);
+        }
+        request(std::move(r));
+        return;
+    }
     case RFM_MOVE_ACT_CLICK:                    // the metronome and Sample's loop: at this millisecond's place in
     case RFM_MOVE_ACT_AUDIO_REC:                // the engine's ring (coreAudio); the take's bars and tempo with it
         if (core_)
@@ -528,6 +639,17 @@ void MoveLink::coreTick(uint32_t ms, MoveTarget &t, const uint8_t levels[RFM_MOV
         rfm1cs_session_redraw(s_, now);
     }
     drive(now, true);                           // the Move's bytes, the app's calls, the timers
+    // (0.5.6) the firmware's own button names for the Move's popups: on a load (a new core) and a setting change
+    {
+        std::array<std::string, RFM_MOVE_NBTN> nm;
+        if (t.moveButtonNames(namesGen_, nm)) {
+            const char *p[RFM_MOVE_NBTN];
+            for (int b = 0; b < RFM_MOVE_NBTN; b++)
+                p[b] = nm[(size_t)b].empty() ? nullptr : nm[(size_t)b].c_str();
+            rfm_move_set_button_names(&s_->core, p);
+            rfm1cs_session_redraw(s_, now);
+        }
+    }
     // the sequencer and the popups' timers by the device clock (us)
     const uint32_t dt = started_ ? ms - lastMs_ : 0;
     lastMs_ = ms, started_ = true;
@@ -715,6 +837,23 @@ void MoveLink::testDrop()
         dropReq_ = true;
     }
     cv_.notify_all();
+}
+
+std::string MoveLink::testFw()
+{
+    std::lock_guard<std::mutex> g(smu_);
+    const rfm_move_fw_state_t &f = s_->core.fw;
+    char line[512];
+    std::snprintf(line, sizeof line, "%d %d %d %s %d\n", rfm_move_fw_caps_get(&s_->core), f.active, f.track,
+                  f.slot_id[0][0] ? f.slot_id[0] : "-", f.n);
+    std::string out = line;
+    for (int i = 0; i < f.n && f.list; i++) {
+        const rfm_move_fw_t &e = f.list[i];
+        std::snprintf(line, sizeof line, "%s|%s|%s|%d|%d|%d|%d\n", e.id, e.version,
+                      e.installed && e.installed[0] ? e.installed : "-", e.cats, e.cat, e.virt, e.thumb ? 1 : 0);
+        out += line;
+    }
+    return out;
 }
 
 int MoveLink::testTakeLeds(rfm_move_led_t *out, int max)

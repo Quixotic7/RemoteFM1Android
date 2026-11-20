@@ -558,6 +558,20 @@ struct rfme final : rfm::MoveTarget {
     // (Android) the ring position this device millisecond's sound plays at (the audio clock's render; -1 otherwise),
     // and how far the core thread runs ahead of what is heard: the latency
     int64_t moveAudioPos() override { return producing ? (int64_t)(outAt + dev->render_frame()) : -1; }
+    // (0.5.10) the running core's button names for the Move (rfme_button_names' rules: the setting off, none). This
+    // thread runs only while a core is loaded; the lock is the names' readers' (a load happens with the clock stopped)
+    bool moveButtonNames(uint32_t &gen, std::array<std::string, RFM_MOVE_NBTN> &names) override
+    {
+        const uint32_t g = namesGen.load();
+        if (g == gen)
+            return false;
+        gen = g;
+        std::lock_guard<std::mutex> l(coreLock);
+        const bool use = namesUse.load() != 0 && core != nullptr;
+        for (int i = 0; i < RFM_MOVE_NBTN && i < FM1P_NB; i++)
+            names[(size_t)i] = use ? core->info().button_names[(size_t)i] : std::string();
+        return true;
+    }
     uint32_t moveLeadUs() override
     {
         const double r = hostRate.load(std::memory_order_relaxed);
