@@ -181,7 +181,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     private var coreSeq = 0
     private var searchingSince: Long? = null
     private val rgba = ByteArray(240 * 240 * 4)
-    private var booted: String? = null
+    @Volatile private var booted: String? = null
     var playingListener: ((Boolean, String) -> Unit)? = null
 
     // ---- (G: the battery, RemoteFM1IOS dfbc827) stopped to save the battery in the background: the core kept, its
@@ -267,6 +267,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         useMode(m)
         options.output?.let { chooseOutput(it) }
         setSound(options.sound ?: prefs.getBoolean(KEY_SOUND, true), remember = options.sound == null)   // (A3: on at launch, as on iOS)
+        midi.move.firmware = MoveFirmwareBridge(this, main)    // (the Move's firmware browser: the app's catalog)
         tick()
     }
 
@@ -529,6 +530,28 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     }
 
     private fun nameOf(id: String) = fw.core(id)?.name ?: id
+
+    // ---------------------------------------------------------------- the Ableton Move's firmware browser
+    /** the firmware id playing now (the Move's slot 0): the booted selection in Core mode; null none (any thread) */
+    val runningFirmwareId: String?
+        get() = booted?.takeIf { mode == Mode.CORE && it == selected }?.let { fw.core(it)?.firmwareID }
+
+    /** (main thread) a jog press's load on the Move: picked as on the Firmware page (Get firmware's play: selected,
+     *  Core mode); null, or why it didn't start */
+    fun moveLoad(key: String): String? {
+        if (fw.core(key) == null) refreshCatalog()
+        if (fw.core(key) == null) return "That firmware isn't in the app any more."
+        Log.i(TAG, "move: load $key")
+        select(key)
+        if (mode != Mode.CORE) useMode(Mode.CORE)
+        return if (mode == Mode.CORE && booted == key) null else message.ifEmpty { "${nameOf(key)} didn't start." }
+    }
+
+    /** (main thread) the Move's unload: no firmware plays (the test pattern, as Core mode turned off) */
+    fun moveUnload() {
+        Log.i(TAG, "move: unload")
+        if (mode == Mode.CORE) useMode(Mode.PATTERN)
+    }
 
     // ---- (E: ain1) the input on while the selected .rfm1 wants it, it is on for it, and the core plays with sound
     /** the firmware [id]'s ain1 mode: 0 none (built-in cores), 1 wants, 2 needs */

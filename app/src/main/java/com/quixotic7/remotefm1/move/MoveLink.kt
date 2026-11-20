@@ -8,6 +8,11 @@
 //     the next start (moveAuto), the status for the page
 //   - the core's requests answered on a poll thread: its settings into the preferences, its 32 projects as files
 //     (MoveProjects: save, load, delete, cut, copy, paste, colour), Sample's takes as WAV files (MoveTakes, Android's)
+//   - (rfm1cs-abletonmove 0.5.10) the Move's firmware browser on one firmware and no FX (the core made with
+//     rfm_move_fw_caps 0): the app's catalog as its list (MoveCatalog, through [firmware]: sent again when the
+//     catalog, the install states or the thumbnails change, built on its own thread), what plays now as slot 0, a jog
+//     press's load (the app's own pick), unload, a download through Get firmware's install (its progress on the Move),
+//     the library blob kept in files/move/library.bin (MoveLibrary) and given back at start, the level kept
 // The core is made at the first Connect and stays on the engine for the app's life (the sequencer and the projects
 // with it); a disconnect lets go of everything the Move held and saves the project.
 package com.quixotic7.remotefm1.move
@@ -23,6 +28,8 @@ class MoveLink(
     private val settings: MoveSettings,
     val projects: MoveProjects,
     val takes: MoveTakes,
+    /** the Move's library blob (files/move/library.bin) */
+    private val library: MoveLibrary,
     /** move.local and other .local names: an IPv4 address from the network (MoveMdns under a multicast lock), null */
     private val mdns: (String) -> String?,
     /** runs on the main thread (the state below is Compose state) */
@@ -56,7 +63,17 @@ class MoveLink(
     var log: ((String) -> Unit)? = null
     val buttonTitle: String get() = if (want && tone != Tone.BAD) "Disconnect" else if (tone == Tone.BAD) "Try again" else "Connect my Move"
 
+    /** the app's firmware for the Move's browser (AppModel sets it); null: an empty list */
+    @Volatile var firmware: MoveFirmwareHost? = null
+
     @Volatile private var handle = 0L
+    // the firmware browser: the list the core holds, what slot 0 was said to hold, the catalog's build in flight
+    @Volatile private var fwShown: List<MoveFw> = emptyList()
+    @Volatile private var fwSlot: String? = null
+    @Volatile private var fwSlotSent = false
+    @Volatile private var fwStamp: Any? = null
+    @Volatile private var fwLoading = false         // (a load from the Move under way: slot 0 is its answer's)
+    private val fwBuilding = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var gen = 0                    // (a Connect started after another: the older resolve is dropped)
     private val lock = Object()
     private var projBuf: ByteArray? = null          // projects mode's cut / copy (the app's buffer)
@@ -100,6 +117,9 @@ class MoveLink(
 
     fun auto() { if (settings.auto && !want) connect() }
 
+    /** (tests) the core made and attached, as by a Connect, without the network: its handle */
+    internal fun testCore(): Long { ensureCore(); return handle }
+
     fun disconnect() {
         want = false
         gen++
@@ -113,7 +133,7 @@ class MoveLink(
     private fun ensureCore() {
         synchronized(lock) {
             if (handle != 0L) return
-            val h = MoveNative.create(settings.image)
+            val h = MoveNative.create(settings.image, library.read())
             handle = h
             attach(h)
             val list = projects.list()
@@ -144,6 +164,7 @@ class MoveLink(
                 }
             }
             val now = System.currentTimeMillis()
+            if (now - lastStatus >= 200) fwSync(h)
             if (now - lastStatus >= 200) {
                 lastStatus = now
                 val st = MoveNative.status(h)
@@ -154,6 +175,92 @@ class MoveLink(
                 }
             }
             try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { return }
+        }
+    }
+
+    // ---------------------------------------------------------------- the firmware browser
+    /** the list sent again when the app's catalog changed (built on its own thread: the thumbnails), and slot 0 when
+     *  what plays changed (a pick in the app, a load from the Move, an unload) */
+    private fun fwSync(h: Long) {
+        val host = firmware ?: return
+        val stamp = runCatching { host.stamp() }.getOrNull()
+        if (stamp != fwStamp && fwBuilding.compareAndSet(false, true)) {
+            Thread({
+                try {
+                    val l = host.catalog()
+                    fwShown = l
+                    MoveNative.fwList(h, l)
+                    fwStamp = stamp
+                    fwSlotSent = false              // (slot 0 said again with the new list)
+                    log?.invoke("move: catalog of ${l.size} firmware (${l.count { it.installed != null }} here)")
+                } catch (e: Exception) {
+                    fwStamp = stamp
+                    log?.invoke("move: catalog failed: $e")
+                } finally {
+                    fwBuilding.set(false)
+                }
+            }, "RFM Move catalog").apply { isDaemon = true; start() }
+        }
+        if (fwLoading) return
+        val r = runCatching { host.running() }.getOrNull()
+        if (!fwSlotSent || r != fwSlot) {
+            fwSlot = r
+            fwSlotSent = true
+            MoveNative.fwSlot(h, r)
+        }
+    }
+
+    private fun fwEntry(id: String): MoveFw? = fwShown.firstOrNull { it.id == id }
+
+    /** the Move's FW_* requests: load (a jog press), unload, download, the level, the library */
+    private fun fwRequest(h: Long, kind: Int, value: Int, data: ByteArray) {
+        val id = String(data, Charsets.US_ASCII).trimEnd('\u0000')
+        val host = firmware
+        when (kind) {
+            MoveNative.REQ_FW_LOAD -> {
+                val key = fwEntry(id)?.key
+                if (host == null || key == null) { MoveNative.fwProgress(h, id, MoveNative.FW_FAILED); return }
+                log?.invoke("move: load $id ($key)")
+                MoveNative.fwProgress(h, id, 0)
+                fwLoading = true
+                host.load(key) { err ->
+                    fwLoading = false
+                    if (err == null) {
+                        MoveNative.fwProgress(h, id, 100)
+                        fwSlot = id
+                        fwSlotSent = true
+                        MoveNative.fwSlot(h, id)
+                    } else {
+                        log?.invoke("move: load $id failed: $err")
+                        MoveNative.fwProgress(h, id, MoveNative.FW_FAILED)
+                        toast(err)
+                    }
+                }
+            }
+            MoveNative.REQ_FW_UNLOAD -> {
+                if (host == null) { MoveNative.fwSlot(h, null); return }
+                host.unload {
+                    fwSlot = null
+                    fwSlotSent = true
+                    MoveNative.fwSlot(h, null)
+                }
+            }
+            MoveNative.REQ_FW_DOWNLOAD -> {
+                val e = fwEntry(id)?.download
+                if (host == null || e == null) { MoveNative.fwProgress(h, id, MoveNative.FW_FAILED); return }
+                log?.invoke("move: download $id ${e.version}")
+                var last = -1
+                host.download(e, { p -> if (p != last) { last = p; MoveNative.fwProgress(h, id, p.coerceIn(0, 99)) } }) { v, busy ->
+                    if (v != null) {
+                        MoveNative.fwProgress(h, id, 100)
+                        MoveNative.fwInstalled(h, id, v)
+                    } else {
+                        MoveNative.fwProgress(h, id, if (busy) MoveNative.FW_BUSY else MoveNative.FW_FAILED)
+                    }
+                }
+            }
+            MoveNative.REQ_FW_LIBRARY -> if (!library.write(data)) log?.invoke("move: the library (${data.size} bytes) not kept")
+            MoveNative.REQ_FW_LEVEL -> settings.level = value      // (no output level in the app: kept, not applied)
         }
     }
 
@@ -226,6 +333,8 @@ class MoveLink(
                 MoveNative.projectInfo(h, slot, b)
                 refreshProjects()
             }
+            MoveNative.REQ_FW_LOAD, MoveNative.REQ_FW_UNLOAD, MoveNative.REQ_FW_DOWNLOAD, MoveNative.REQ_FW_LIBRARY,
+            MoveNative.REQ_FW_LEVEL -> fwRequest(h, kind, value, data)
             MoveNative.REQ_SAMPLE_START -> takes.start(value)
             MoveNative.REQ_SAMPLE_STOP -> {
                 drainAudio(h, pcm, total.toLong())
