@@ -304,6 +304,7 @@ enum {
     F_IDLE, F_AUDIO, F_MIDI_IN, F_MIDI_OUT_TAKE, F_HALTED, F_SHUTDOWN, F_FLASH_STAGE, F_FLASH, F_FLASH_DIRTY,
     F_FLASH_SYNC, F_STATS, F_UI_INFO,
     F_AUDIO_IN, F_AUDIO_IN_INFO,                        // (optional: ain1, live audio input)
+    F_LABELS_EPOCH, F_LABEL,                            // (optional: live panel labels, API.md engine.labels())
     F_N
 };
 const struct {
@@ -317,8 +318,11 @@ const struct {
     {"rfm1_shutdown", 0, 0},   {"rfm1_flash_stage", 2, 1},   {"rfm1_flash", 0, 1},        {"rfm1_flash_dirty", 0, 1},
     {"rfm1_flash_sync", 0, 1}, {"rfm1_stats", 2, 0},         {"rfm1_ui_info", 2, 0},
     {"rfm1_audio_in", 2, 0},   {"rfm1_audio_in_info", 2, 0},
+    {"rfm1_labels_epoch", 0, 1}, {"rfm1_label", 1, 1},
 };
-bool optionalExport(int f) { return f == F_INITIALIZE || f == F_AUDIO_IN || f == F_AUDIO_IN_INFO; }
+// optional, and with another signature as if absent (ain1's two; the live labels' two, as the web's engine.js)
+bool lenientExport(int f) { return f == F_AUDIO_IN || f == F_AUDIO_IN_INFO || f == F_LABELS_EPOCH || f == F_LABEL; }
+bool optionalExport(int f) { return f == F_INITIALIZE || lenientExport(f); }
 
 std::string base(const std::string &path)
 {
@@ -820,7 +824,7 @@ bool checkFile(WasmFile &f, std::string *err)
                 continue;
             return bad(std::string("it has no export ") + FN[i].name + " (section 2)");
         }
-        const bool ainExport = i == F_AUDIO_IN || i == F_AUDIO_IN_INFO;
+        const bool ainExport = lenientExport(i);
         if (e->kind != 0 || e->index < importedFuncs || e->index - importedFuncs >= funcs.size())
             return bad(std::string("its export ") + FN[i].name + " is not a function of its own");
         const uint32_t ti = funcs[e->index - importedFuncs];
@@ -1004,7 +1008,7 @@ public:
                 return bad(std::string("no export ") + FN[i].name + " (" + fr + ")");
             }
             if (m3_GetArgCount(fn_[i]) != FN[i].nargs || m3_GetRetCount(fn_[i]) != FN[i].nret) {
-                if (i == F_AUDIO_IN || i == F_AUDIO_IN_INFO) {     // (not the spec's: as if absent)
+                if (lenientExport(i)) {                            // (not the spec's: as if absent)
                     fn_[i] = nullptr;
                     continue;
                 }
@@ -1118,6 +1122,23 @@ public:
     void frame() override { fsApply(); call(F_FRAME); }
     void idle() override { fsApply(); call(F_IDLE); }
     int audio_in_mode() const override { return f_ && (fn_[F_AUDIO_IN] || fn_[F_AUDIO_IN_INFO]) ? f_->ain : 0; }
+    // live labels (web/engines/rfm1/engine.js labels()): both exports or none; a label's pointer bounds-checked, read
+    // up to 64 bytes, cleaned (cleanLabel)
+    uint32_t labels_epoch() override { return fn_[F_LABELS_EPOCH] && fn_[F_LABEL] && !dead_ ? call(F_LABELS_EPOCH) : 0u; }
+    bool label(int which, std::string *out) override
+    {
+        if (!fn_[F_LABELS_EPOCH] || !fn_[F_LABEL] || dead_ || which < 0 || which >= kLabels)
+            return false;
+        const uint32_t p = call(F_LABEL, (uint32_t)which);
+        if (!p || p >= memSize_ || dead_)
+            return false;
+        char b[65];
+        uint32_t n = 0;
+        while (n < 64 && p + n < memSize_ && mem_[p + n])
+            b[n] = (char)mem_[p + n], n++;
+        b[n] = 0;
+        return cleanLabel(b, n, out);
+    }
     void set_audio_in(AudioIn *in) override { ain_ = in; }
 
     // ain1 (API.md section 6): rfm1_audio_in_info on a change, then rfm1_audio_in for the block, before rfm1_audio

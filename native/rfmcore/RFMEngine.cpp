@@ -280,6 +280,7 @@ struct rfme final : rfm::MoveTarget {
     std::atomic<double> hostRate{0};
     std::atomic<uint32_t> headroomUs{kDefaultHeadroomUs}, minBuffer{0};
     std::atomic<bool> offline{false}, retargetReq{false};
+    std::atomic<float> gain{1.f};           // (rfme_set_gain) the app's output volume
     uint32_t pEpoch = ~0u;                  // (the producer's) the epoch it renders
     // (the consumer's)
     uint32_t cEpoch = ~0u, cMaxN = 0;
@@ -1363,6 +1364,13 @@ int rfme_render_midi(rfme_t *e, float *L, float *R, uint32_t n, double rate, con
 {
     const uint64_t t0 = rfm::nowTicks();
     const int ok = e->consume(L, R, n, rate, ev, nev);
+    if (const float g = e->gain.load(std::memory_order_relaxed); g != 1.f && ok) {   // (the app's volume)
+        for (uint32_t i = 0; i < n; i++)
+            L[i] *= g;
+        if (R && R != L)
+            for (uint32_t i = 0; i < n; i++)
+                R[i] *= g;
+    }
     const uint64_t dt = rfm::nowTicks() - t0;
     const uint32_t us = (uint32_t)((double)dt * e->usPerTick);
     e->renders.fetch_add(1, std::memory_order_relaxed);
@@ -1394,6 +1402,12 @@ uint32_t rfme_latency(rfme_t *e, double rate, uint32_t buffer)
 }
 
 void rfme_set_offline(rfme_t *e, int on) { e->offline.store(on != 0); }
+
+void rfme_set_gain(rfme_t *e, float gain)
+{
+    e->gain.store(std::isfinite(gain) ? (gain < 0.f ? 0.f : gain > 1.f ? 1.f : gain) : 1.f, std::memory_order_relaxed);
+}
+float rfme_gain(rfme_t *e) { return e->gain.load(std::memory_order_relaxed); }
 
 void rfme_set_midi(rfme_t *e, int key_channel, int transpose, int key_notes_to_firmware, int use_map)
 {

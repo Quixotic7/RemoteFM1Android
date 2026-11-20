@@ -24,6 +24,27 @@ int CoreBackend::param_find(const char *name) const
     return -1;
 }
 
+bool CoreBackend::cleanLabel(const char *s, size_t max, std::string *out)
+{
+    if (!s)
+        return false;
+    std::string o;
+    for (size_t i = 0; i < max && s[i]; i++)
+        if ((unsigned char)s[i] >= 0x20 && (unsigned char)s[i] < 0x7f)
+            o += s[i];
+    auto trim = [](std::string &t) {
+        const size_t a = t.find_first_not_of(' ');
+        t = a == std::string::npos ? std::string() : t.substr(a, t.find_last_not_of(' ') - a + 1);
+    };
+    trim(o);
+    if (o.size() > 10)
+        o.resize(10);
+    trim(o);
+    if (out)
+        *out = o;
+    return true;
+}
+
 namespace {
 
 std::string str(const char *s) { return s ? s : ""; }
@@ -32,6 +53,8 @@ class NativeCore final : public CoreBackend {
 public:
     explicit NativeCore(SlotLoader::Slot *s) : slot_(s), c_(s->core)
     {
+        lblEpoch_ = reinterpret_cast<uint32_t (*)(void)>(s->symbol("fm1core_labels_epoch"));
+        lblText_ = reinterpret_cast<const char *(*)(int32_t)>(s->symbol("fm1core_label"));
         d_.id = str(c_->id);
         d_.name = str(c_->name);
         d_.version = str(c_->version);
@@ -117,6 +140,14 @@ public:
     int flash_stage(const uint8_t *b, uint32_t n) override { return c_->flash_stage ? c_->flash_stage(b, n) : 0; }
     uint32_t flash_dirty() override { return c_->flash_dirty ? c_->flash_dirty() : 0; }
     int flash_sync() override { return c_->flash_sync ? c_->flash_sync() : 1; }
+    // (Android) live labels: the core's optional symbols in its own copy (the slot's handle), as wasm_glue.c's weak ones
+    uint32_t labels_epoch() override { return lblEpoch_ && lblText_ ? lblEpoch_() : 0u; }
+    bool label(int which, std::string *out) override
+    {
+        if (!lblEpoch_ || !lblText_ || which < 0 || which >= kLabels)
+            return false;
+        return cleanLabel(lblText_((int32_t)which), 64, out);
+    }
     uint32_t param_epoch() override { return c_->param_epoch ? c_->param_epoch() : 0; }
     int32_t knob_target(int role) override { return c_->knob_target ? c_->knob_target(role) : -1; }
 
@@ -172,6 +203,8 @@ public:
 private:
     SlotLoader::Slot *slot_;
     const fm1core_t *c_;
+    uint32_t (*lblEpoch_)(void) = nullptr;
+    const char *(*lblText_)(int32_t) = nullptr;
     CoreDesc d_;
     std::vector<CoreParam> params_;
 };
@@ -214,6 +247,8 @@ public:
     int flash_sync() override { return in_->flash_sync(); }
     uint32_t param_epoch() override { return in_->param_epoch(); }
     int32_t knob_target(int r) override { return in_->knob_target(r); }
+    uint32_t labels_epoch() override { return in_->labels_epoch(); }
+    bool label(int w, std::string *out) override { return in_->label(w, out); }
     uint32_t param_count() const override { return in_->param_count(); }
     const CoreParam *param(uint32_t i) const override { return in_->param(i); }
     bool param_get(uint32_t i, int32_t *v) override { return in_->param_get(i, v); }

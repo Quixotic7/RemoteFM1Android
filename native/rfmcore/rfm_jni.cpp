@@ -247,6 +247,16 @@ JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetOffline(J
     rfme_set_offline(host(p)->e, on ? 1 : 0);
 }
 
+JNIEXPORT void JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeSetGain(JNIEnv *, jclass, jlong p, jfloat g)
+{
+    rfme_set_gain(host(p)->e, g);
+}
+
+JNIEXPORT jfloat JNICALL Java_com_quixotic7_remotefm1_RfmEngine_nativeGain(JNIEnv *, jclass, jlong p)
+{
+    return rfme_gain(host(p)->e);
+}
+
 // tests (the caller set RFME_CLOCK_AUDIO, offline): `count` renders of `frames` at `rate` (rfme_render_midi, no host
 // MIDI); returns the core's MIDI out packets taken after each, and the audio's sum of squares and samples in `level`
 // ([sum, n, peak])

@@ -39,6 +39,11 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
 
     fun setOffline(on: Boolean) = nativeSetOffline(handle, on)
 
+    /** The app's output volume 0..1 (rfme_set_gain): every render scaled by it, the whole mix. */
+    var volume: Float
+        get() = nativeGain(handle)
+        set(v) = nativeSetGain(handle, v)
+
     /**
      * Tests, with [CLOCK_AUDIO] and [setOffline] on: [count] renders of [frames] at [rate]; the core's MIDI out packets
      * (USB-MIDI, cin | b0 << 8 | b1 << 16 | b2 << 24) and the audio's RMS and peak into [level] if given.
@@ -306,6 +311,8 @@ class RfmEngine(link: RfmLink? = null) : AutoCloseable {
         @JvmStatic private external fun nativeSetMidi(h: Long, keyChannel: Int, transpose: Int, keyNotes: Boolean, useMap: Boolean)
         @JvmStatic private external fun nativeMidiOutEnable(h: Long, on: Int)
         @JvmStatic private external fun nativeSetOffline(h: Long, on: Boolean)
+        @JvmStatic private external fun nativeSetGain(h: Long, g: Float)
+        @JvmStatic private external fun nativeGain(h: Long): Float
         @JvmStatic private external fun nativeRenderBlocks(h: Long, count: Int, frames: Int, rate: Double, level: DoubleArray): IntArray
         @JvmStatic private external fun nativeDestroy(h: Long)
         @JvmStatic private external fun nativeLoad(h: Long, id: String): String

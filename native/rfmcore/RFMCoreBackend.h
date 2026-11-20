@@ -184,6 +184,16 @@ public:
     virtual int flash_sync() = 0;                                            // 1: current (also: no flash)
     virtual uint32_t param_epoch() { return 0; }
     virtual int32_t knob_target(int /*role*/) { return -1; }
+    // (the clock's thread) the firmware's live panel labels (FM1VST docs/DYNAMIC-LABELS.md; RemoteFM1 web/engine/API.md
+    // engine.labels()): the core's epoch (0: none: no labels, or a firmware built before them), and label `which`
+    // (0..kLabels - 1, FM1CORE_LBL_* order) as the web engines clean it (printable ASCII, trimmed, at most 10
+    // characters; "" no job); false: not given. A native core's optional fm1core_labels_epoch / fm1core_label, an
+    // .rfm1's optional rfm1_labels_epoch / rfm1_label
+    static constexpr int kLabels = 49;
+    virtual uint32_t labels_epoch() { return 0; }
+    virtual bool label(int /*which*/, std::string * /*out*/) { return false; }
+    // the web engines' cleanLabel (common/shared.js) on a C string: nullptr -> false
+    static bool cleanLabel(const char *s, size_t max, std::string *out);
 
     // ---- the Tier 2 parameter map (the clock's thread; a Wasm core: none in .rfm1 version 1, nor knob_target or
     // param_epoch: its knobs are relative host parameters and its Tier 2 slots unused)
