@@ -342,25 +342,6 @@ class MoveCoreTest {
         assertTrue("${ons[3] - ons[1]}", abs(ons[3] - ons[1] - 96000) <= 96)
     }
 
-    /** (0.5.11) the app's volume (rfme_set_gain) scales the whole mix: the metronome's clicks at a quarter */
-    @Test fun theAppsVolumeScalesTheMix() {
-        val e = setup(RfmEngine.CLOCK_AUDIO)
-        e.renderBlocks(20, 480, 48000.0)
-        program()
-        press(MoveNative.cc(49, 127)); stepTap(5); press(MoveNative.cc(49, 0))
-        val full = DoubleArray(2)
-        e.renderBlocks(400, 480, 48000.0, full)          // 4 s: two bars, an accent whole in each window
-        e.volume = 0.25f
-        assertEquals(0.25f, e.volume, 0f)
-        val quarter = DoubleArray(2)
-        e.renderBlocks(400, 480, 48000.0, quarter)
-        e.volume = 1f
-        assertTrue("clicks heard: ${full[1]}", full[1] > 0.05)
-        assertTrue("a quarter: ${quarter[1]} of ${full[1]}", quarter[1] > full[1] * 0.2 && quarter[1] < full[1] * 0.3)
-        e.volume = 7f
-        assertEquals("kept to 0..1", 1f, e.volume, 0f)
-    }
-
     @Test fun metronomeAndSampleOnTheAudioClock() {
         val e = setup(RfmEngine.CLOCK_AUDIO)
         e.renderBlocks(20, 480, 48000.0)

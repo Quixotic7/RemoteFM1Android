@@ -69,6 +69,19 @@ class WiringTest {
         rule.runOnUiThread { m.select("choralroot") }
     }
 
+    /** (0.5.11) the app's volume is MASTER: the Move's level turns the faceplate's MASTER, and MASTER is the volume */
+    @Test fun theVolumeIsMaster() {
+        core()
+        rule.runOnUiThread { m.select("choralroot") }
+        assertTrue(until(10_000) { m.engineStatus.optInt("booted") != 0 })
+        rule.runOnUiThread { m.setVolume(0.4f, fromMove = true) }
+        val feed = rule.activity.appUi.feed
+        assertTrue("the faceplate's MASTER: ${feed.knobs.master}", until(5_000) { feed.knobs.master == 409 })
+        rule.runOnUiThread { assertEquals(0.4f, m.volume, 0.001f) }
+        rule.runOnUiThread { feed.master(1023) }
+        assertTrue("MASTER turned on the faceplate is the volume", until(5_000) { m.volume == 1f })
+    }
+
     @Test fun aStateSavesAndLoads() {
         core()
         rule.runOnUiThread { m.select("choralroot") }

@@ -136,6 +136,8 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         private set
     var master by mutableStateOf<Int?>(null)
         private set
+    private val panelBuf = IntArray(56)                        // (masterNow: before init, which ticks)
+    private var masterSent = -1                                 // (the MASTER the Move last heard as its level)
     var engineStatus by mutableStateOf(JSONObject())
         private set
     // (E: iOS 836a983 / 3828820 / 14c9b96) a Wasm core's headroom, screen rate and thread priority per firmware
@@ -267,7 +269,6 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         useMode(m)
         options.output?.let { chooseOutput(it) }
         setSound(options.sound ?: prefs.getBoolean(KEY_SOUND, true), remember = options.sound == null)   // (A3: on at launch, as on iOS)
-        engine.volume = prefs.getFloat(KEY_VOLUME, 1f).let { if (it.isNaN()) 1f else it.coerceIn(0f, 1f) }   // (0.5.11)
         midi.move.firmware = MoveFirmwareBridge(this, main)    // (the Move's firmware browser: the app's catalog)
         tick()
     }
@@ -322,15 +323,28 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         playingChanged()
     }
 
-    /** (0.5.11) the app's output volume 0..1 (the engine's gain, kept in "volume"; the web page's volume slider): the
-     *  Move's level sets it ([fromMove]: not sent back); any other change goes to the Move as slot 0's level */
-    val volume: Float get() = engine.volume
+    /** (0.5.11) the app's volume 0..1 is the FM-1's own volume knob, MASTER (0..1023, full while unknown): the Move's
+     *  level turns it ([fromMove]: not sent back); MASTER turned anywhere else (the faceplate, a learned pot, the
+     *  OMX-27, a state) goes to the Move as slot 0's level from [followMaster] */
+    val volume: Float get() = masterNow().let { if (it < 0) 1f else it / 1023f }
 
     fun setVolume(v: Float, fromMove: Boolean = false) {
         val x = if (v.isNaN()) 1f else v.coerceIn(0f, 1f)
-        engine.volume = x
-        prefs.edit().putFloat(KEY_VOLUME, x).apply()
-        if (!fromMove) midi.move.pageLevel(x)
+        val pot = Math.round(x * 1023f)
+        if (fromMove) masterSent = pot                          // (seen by followMaster: not sent back)
+        engine.event(4, 0, pot)                                // (RFMC_EV_MASTER)
+        if (!fromMove) followMaster()
+    }
+
+    /** the engine's MASTER now, -1 unknown (rfme_panel_t: index 10, PanelFeed.I_MASTER) */
+    private fun masterNow(): Int = panelBuf.let { engine.panel(it); it[10] }
+
+    /** MASTER changed since the Move last heard it: sent as slot 0's level (from [tick]) */
+    private fun followMaster() {
+        val m = masterNow()
+        if (m < 0 || m == masterSent) return
+        masterSent = m
+        midi.move.pageLevel(m / 1023f)
     }
 
     fun setSound(on: Boolean, remember: Boolean = true) {
@@ -738,6 +752,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
     // ---------------------------------------------------------------- reading the link and the engine
     private fun tick() {
         refresh()
+        followMaster()                                          // (MASTER to the Move as its level)
         main.postDelayed({ tick() }, 66)
     }
 
@@ -830,7 +845,6 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         private const val KEY_OUTPUT = "audio_output"
         private const val KEY_USB_AUDIO = "usb_audio"
         private const val KEY_SOUND = "sound"
-        const val KEY_VOLUME = "volume"
         /** the cores' order in the picker (RemoteFM1IOS CorePlayer.order) */
         val ORDER = listOf("choralroot", "felucca", "melodee", "fizz", "saadet", "boardwalk", "loom")
 

@@ -116,10 +116,6 @@ typedef struct {
 // core's audio played (some frames of it), 0 silence (not booted, not the clock's owner, the ring still filling).
 // Real-time safe: no locks, no allocation, no waits (offline: bounded waits for the core thread).
 int rfme_render_midi(rfme_t *e, float *L, float *R, uint32_t n, double rate, const rfme_midi_t *ev, uint32_t nev);
-// (Android, any thread) the app's output volume 0..1 (default 1): every rfme_render's frames scaled by it (the whole
-// mix: the firmware and the Move's metronome), as the web page's volume slider. rfme_gain: the value now
-void rfme_set_gain(rfme_t *e, float gain);
-float rfme_gain(rfme_t *e);
 // (any thread) the ring's target: the largest host buffer seen (at least min_buffer_frames) + headroom_us (default
 // 6000, 0 frames); applies from the next render on
 void rfme_set_latency(rfme_t *e, uint32_t headroom_us, uint32_t min_buffer_frames);
