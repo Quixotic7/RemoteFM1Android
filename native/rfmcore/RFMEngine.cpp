@@ -573,6 +573,24 @@ struct rfme final : rfm::MoveTarget {
             names[(size_t)i] = use ? core->info().button_names[(size_t)i] : std::string();
         return true;
     }
+    // (0.5.11) the running core's live labels for the Move (RemoteFM1 web: the engine's labels().list, sent with the
+    // "Firmware's button names" setting on): its epoch read here, on the clock's thread, so they are read again on a
+    // new core (namesGen), the setting, or the firmware's own change
+    bool moveLabels(uint64_t &seen, std::array<std::string, RFM_MOVE_LBL_N> &lbl,
+                    std::array<uint8_t, RFM_MOVE_LBL_N> &given) override
+    {
+        const uint32_t g = namesGen.load();
+        const bool use = namesUse.load() != 0 && core != nullptr;
+        const uint32_t ep = use ? core->labels_epoch() : 0u;
+        const uint64_t key = (uint64_t)g << 32 | ep;
+        if (key == seen)
+            return false;
+        seen = key;
+        given.fill(0);
+        for (int i = 0; ep && i < RFM_MOVE_LBL_N && i < rfm::CoreBackend::kLabels; i++)
+            given[(size_t)i] = core->label(i, &lbl[(size_t)i]) ? 1 : 0;
+        return true;
+    }
     uint32_t moveLeadUs() override
     {
         const double r = hostRate.load(std::memory_order_relaxed);

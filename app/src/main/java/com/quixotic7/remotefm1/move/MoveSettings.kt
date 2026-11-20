@@ -3,8 +3,8 @@
 // What the Move link keeps in the app's preferences, as the web player keeps it in its prefs (RemoteFM1 18c6a82
 // web/site/js/move-link.js): the core's settings image (rfm_move_save's bytes, base64: "move"), the address
 // ("moveAddr"; the web's moveUrl), connect at start ("moveAuto": set by Connect, cleared by Disconnect) and the project
-// last open ("moveProject", 0..31); (0.5.10) the firmware's level the Move set ("moveLevel", 0..127: the app has no
-// output level of its own, so it is kept and not applied; the library blob keeps it too).
+// last open ("moveProject", 0..31); (0.5.10) the firmware's level the Move set ("moveLevel", 0..127; the library blob
+// keeps it too). (0.5.11) It is applied now: the app's volume follows it (AppModel's "volume", 100 = full).
 package com.quixotic7.remotefm1.move
 
 import java.util.Base64

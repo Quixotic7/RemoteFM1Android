@@ -12,7 +12,11 @@
 //     rfm_move_fw_caps 0): the app's catalog as its list (MoveCatalog, through [firmware]: sent again when the
 //     catalog, the install states or the thumbnails change, built on its own thread), what plays now as slot 0, a jog
 //     press's load (the app's own pick), unload, a download through Get firmware's install (its progress on the Move),
-//     the library blob kept in files/move/library.bin (MoveLibrary) and given back at start, the level kept
+//     the library blob kept in files/move/library.bin (MoveLibrary) and given back at start
+//   - (0.5.11, as the web page) Fantasy CFWs listed with virt (their badge, step 16's filter); the firmware's live
+//     labels and button names to the core on a load (the native side: MoveLink.cpp coreTick), its readouts forgotten
+//     on a load or unload; the app's volume as slot 0's level (pageLevel, also once at start) and the Move's level as
+//     the app's volume ([MoveFirmwareHost.level]), never played back
 // The core is made at the first Connect and stays on the engine for the app's life (the sequencer and the projects
 // with it); a disconnect lets go of everything the Move held and saves the project.
 package com.quixotic7.remotefm1.move
@@ -73,6 +77,7 @@ class MoveLink(
     @Volatile private var fwSlotSent = false
     @Volatile private var fwStamp: Any? = null
     @Volatile private var fwLoading = false         // (a load from the Move under way: slot 0 is its answer's)
+    @Volatile private var levelSent = false         // (the app's volume given as the level once)
     private val fwBuilding = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var gen = 0                    // (a Connect started after another: the older resolve is dropped)
     private val lock = Object()
@@ -183,6 +188,10 @@ class MoveLink(
      *  what plays changed (a pick in the app, a load from the Move, an unload) */
     private fun fwSync(h: Long) {
         val host = firmware ?: return
+        if (!levelSent) {                               // (once at start: the app's volume is the slot's level)
+            levelSent = true
+            runCatching { host.volume() }.getOrNull()?.let { MoveNative.fwSetLevel(h, 0, levelOf(it)) }
+        }
         val stamp = runCatching { host.stamp() }.getOrNull()
         if (stamp != fwStamp && fwBuilding.compareAndSet(false, true)) {
             Thread({
@@ -260,8 +269,19 @@ class MoveLink(
                 }
             }
             MoveNative.REQ_FW_LIBRARY -> if (!library.write(data)) log?.invoke("move: the library (${data.size} bytes) not kept")
-            MoveNative.REQ_FW_LEVEL -> settings.level = value      // (no output level in the app: kept, not applied)
+            MoveNative.REQ_FW_LEVEL -> {                 // (0.5.11) the app's volume follows (the web's level())
+                settings.level = value
+                host?.level(value)
+            }
         }
+    }
+
+    /** (0.5.11) the app's volume (0..1) as slot 0's level (100 = full: the scale [MoveFirmwareHost.level] uses), as
+     *  the Move's own edit (the library keeps it); no level comes back from it (the web page's pageLevel) */
+    fun pageLevel(volume: Float) {
+        val h = handle
+        if (h == 0L || firmware == null) return
+        MoveNative.fwSetLevel(h, 0, levelOf(volume))
     }
 
     /** the native status onto the page; returns the state */
@@ -400,6 +420,9 @@ class MoveLink(
 
     companion object {
         const val POLL_MS = 15L
+        /** the web page's scales: volume 0..1 -> level round(v x 100) (0..127), level -> volume min(1, l / 100) */
+        fun levelOf(volume: Float): Int = Math.round(volume * 100f).coerceIn(0, 127)
+        fun volumeOf(level: Int): Float = (level.coerceAtLeast(0) / 100f).coerceAtMost(1f)
         val VIA = listOf("Wi-Fi", "USB", "this computer")       // MR_VIA_*
         val MODES = listOf("FM-1", "MIDI", "Control", "Seq")    // rfm_move_mode_name
         const val LEAVE = "Shift + touch the volume knob + click the jog wheel on the Move to leave Move Remote."

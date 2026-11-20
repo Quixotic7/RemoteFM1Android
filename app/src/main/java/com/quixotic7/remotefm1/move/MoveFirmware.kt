@@ -67,6 +67,10 @@ interface MoveFirmwareHost {
     /** [e] downloaded and installed by the store; [progress] 0..99; [done] gets the version installed, or null and
      *  whether another download was running (busy) */
     fun download(e: AvailableFirmware, progress: (Int) -> Unit, done: (String?, Boolean) -> Unit)
+    /** (0.5.11) the app's volume 0..1 now (sent as slot 0's level at start), null: the app has none */
+    fun volume(): Float? = null
+    /** (0.5.11) the Move set slot 0's level (0..127): the app's volume follows it (100 = full, the web page's scale) */
+    fun level(v: Int) {}
 }
 
 object MoveCatalog {

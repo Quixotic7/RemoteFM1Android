@@ -262,6 +262,25 @@ JNIEXPORT void JNICALL F(nativeFwProgress)(JNIEnv *env, jclass, jlong h, jstring
 
 JNIEXPORT jint JNICALL F(nativeLibraryMax)(JNIEnv *, jclass) { return (jint)rfmm_library_max(); }
 
+JNIEXPORT void JNICALL F(nativeFwSetLevel)(JNIEnv *, jclass, jlong h, jint slot, jint level)
+{
+    rfmm_fw_set_level(mv(h), slot, level);
+}
+
+JNIEXPORT jstring JNICALL F(nativeTestLabels)(JNIEnv *env, jclass, jlong h)
+{
+    const int n = rfmm_test_labels(mv(h), nullptr, 0);
+    std::vector<char> b((size_t)n + 1);
+    rfmm_test_labels(mv(h), b.data(), (uint32_t)b.size());
+    return env->NewStringUTF(b.data());
+}
+
+JNIEXPORT void JNICALL F(nativeTestReadout)(JNIEnv *env, jclass, jlong h, jint control, jstring title, jstring value)
+{
+    const std::string t = str(env, title), v = str(env, value);
+    rfmm_test_readout(mv(h), control, t.c_str(), v.c_str());
+}
+
 JNIEXPORT jstring JNICALL F(nativeTestFw)(JNIEnv *env, jclass, jlong h)
 {
     const int n = rfmm_test_fw(mv(h), nullptr, 0);

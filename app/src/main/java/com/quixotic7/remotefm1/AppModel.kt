@@ -267,6 +267,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         useMode(m)
         options.output?.let { chooseOutput(it) }
         setSound(options.sound ?: prefs.getBoolean(KEY_SOUND, true), remember = options.sound == null)   // (A3: on at launch, as on iOS)
+        engine.volume = prefs.getFloat(KEY_VOLUME, 1f).let { if (it.isNaN()) 1f else it.coerceIn(0f, 1f) }   // (0.5.11)
         midi.move.firmware = MoveFirmwareBridge(this, main)    // (the Move's firmware browser: the app's catalog)
         tick()
     }
@@ -319,6 +320,17 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
             }
         }
         playingChanged()
+    }
+
+    /** (0.5.11) the app's output volume 0..1 (the engine's gain, kept in "volume"; the web page's volume slider): the
+     *  Move's level sets it ([fromMove]: not sent back); any other change goes to the Move as slot 0's level */
+    val volume: Float get() = engine.volume
+
+    fun setVolume(v: Float, fromMove: Boolean = false) {
+        val x = if (v.isNaN()) 1f else v.coerceIn(0f, 1f)
+        engine.volume = x
+        prefs.edit().putFloat(KEY_VOLUME, x).apply()
+        if (!fromMove) midi.move.pageLevel(x)
     }
 
     fun setSound(on: Boolean, remember: Boolean = true) {
@@ -818,6 +830,7 @@ class AppModel private constructor(private val ctx: Context, val options: Launch
         private const val KEY_OUTPUT = "audio_output"
         private const val KEY_USB_AUDIO = "usb_audio"
         private const val KEY_SOUND = "sound"
+        const val KEY_VOLUME = "volume"
         /** the cores' order in the picker (RemoteFM1IOS CorePlayer.order) */
         val ORDER = listOf("choralroot", "felucca", "melodee", "fizz", "saadet", "boardwalk", "loom")
 

@@ -14,6 +14,7 @@ import com.quixotic7.remotefm1.firmware.FirmwareListing
 import com.quixotic7.remotefm1.move.MoveCatalog
 import com.quixotic7.remotefm1.move.MoveFirmwareHost
 import com.quixotic7.remotefm1.move.MoveFw
+import com.quixotic7.remotefm1.move.MoveLink
 import java.util.concurrent.ConcurrentHashMap
 
 class MoveFirmwareBridge(private val m: AppModel, private val main: Handler) : MoveFirmwareHost {
@@ -89,6 +90,13 @@ class MoveFirmwareBridge(private val m: AppModel, private val main: Handler) : M
                 done(null, false)
             }
         }, "RFM Move download").apply { isDaemon = true; start() }
+    }
+
+    // (0.5.11) the app's volume as the Move's level, both ways (the web page's moveFirmwareHost volume / level)
+    override fun volume(): Float = m.volume
+
+    override fun level(v: Int) {
+        main.post { m.setVolume(MoveLink.volumeOf(v), fromMove = true) }
     }
 
     private companion object { val NONE = Any() }

@@ -4,7 +4,9 @@
 // core made as the app makes it (rfm_move_fw_caps 0), the catalog sent from a firmware host (the bundled cores, as the
 // Firmware page lists them), the fake Move's presses (Track 1 held + step 1, a pad, the jog's click) asking for a load,
 // the bundled firmware loaded into the engine and slot 0 said back (fw_slots), the library blob kept in its file and
-// given to the next core, and Tracks 2 and 3 doing nothing with one slot.
+// given to the next core, and Tracks 2 and 3 doing nothing with one slot. (0.5.11) A Fantasy CFW's virt and step 16's
+// filter; the firmware's live labels after a load (RemoteFM1's labels_core fixture), cleared with the setting off and
+// on unload, readouts forgotten; the app's volume and the Move's level both ways.
 package com.quixotic7.remotefm1.move
 
 import android.os.Handler
@@ -35,12 +37,15 @@ class MoveFirmwareTest {
     private lateinit var dir: File
 
     /** the app's side for the test: the bundled cores, a load done by the test's thread (the engine's core thread) */
-    private class Host(val cores: List<CoreInfo>) : MoveFirmwareHost {
+    private class Host(val cores: List<CoreInfo>, val extra: List<MoveFw> = emptyList(), val vol: Float? = null) : MoveFirmwareHost {
         @Volatile var playing: String? = null
         val loads = ConcurrentLinkedQueue<Pair<String, (String?) -> Unit>>()
+        val levels = ConcurrentLinkedQueue<Int>()
         override fun stamp(): Any = cores
         override fun catalog() = MoveCatalog.build(cores, emptyMap(), emptyList<AvailableFirmware>(),
-            { InstallState.NotInstalled }, emptyMap())
+            { InstallState.NotInstalled }, emptyMap()) + extra
+        override fun volume() = vol
+        override fun level(v: Int) { levels.add(v) }
         override fun running() = playing
         override fun load(key: String, done: (String?) -> Unit) { loads.add(key to done) }
         override fun unload(done: () -> Unit) { playing = null; done() }
@@ -70,7 +75,8 @@ class MoveFirmwareTest {
     private fun await(what: String, ms: Long = 5000, ok: () -> Boolean) {
         val end = SystemClock.elapsedRealtime() + ms
         while (!ok()) {
-            assertTrue("waited for $what: ${if (h != 0L) MoveNative.testFw(h).lineSequence().first() else ""}",
+            assertTrue("waited for $what: ${if (h != 0L) MoveNative.testFw(h).lineSequence().first() + " / " +
+                MoveNative.testLabels(h).lineSequence().first() else ""}",
                 SystemClock.elapsedRealtime() < end)
             step(1)
             SystemClock.sleep(1)
@@ -82,7 +88,7 @@ class MoveFirmwareTest {
     /** the core's firmware state: caps, active, the view's track, slot 0, the list's length */
     private fun head(): List<String> = MoveNative.testFw(h).lineSequence().first().split(' ')
 
-    private fun setup(): Host {
+    private fun setup(extra: List<MoveFw> = emptyList(), vol: Float? = null): Host {
         dir = File(ctx.cacheDir, "move-fw-test-${System.nanoTime()}").apply { mkdirs() }
         RfmEngine.scan(ctx.applicationInfo.nativeLibraryDir)
         val e = RfmEngine(null)
@@ -90,7 +96,7 @@ class MoveFirmwareTest {
         assertTrue(e.testLoadEcho())
         assertTrue(e.boot())
         e.setClock(RfmEngine.CLOCK_CALLER)
-        val host = Host(CoreInfo.builtInList(RfmEngine.cores()))
+        val host = Host(CoreInfo.builtInList(RfmEngine.cores()), extra, vol)
         val main = Handler(Looper.getMainLooper())
         val l = MoveLink({ e.moveAttach(it) }, MoveSettings(MapPrefs()), MoveProjects(File(dir, "projects"), MoveNative.FileCodec),
             MoveTakes(File(dir, "takes")), MoveLibrary(File(dir, "library.bin"), MoveNative.libraryMax), { null }, { main.post(it) })
@@ -99,7 +105,7 @@ class MoveFirmwareTest {
         h = l.testCore()
         MoveNative.testConnected(h, true)
         await("connected") { MoveNative.status(h).state == MoveNative.CONNECTED }
-        await("the catalog") { head()[4].toInt() == host.cores.size }
+        await("the catalog") { head()[4].toInt() == host.cores.size + extra.size }
         return host
     }
 
@@ -172,6 +178,92 @@ class MoveFirmwareTest {
         assertNotNull("SETTINGS", img)
         assertEquals(87, img!!.size)
         assertEquals("version 5", 5, img!![3].toInt())
+    }
+
+    /** (0.5.11) the core's labels state: "given readouts level0", then the 49 labels ("1|text" given, "0|" not) */
+    private fun labels(): List<String> = MoveNative.testLabels(h).lines()
+    private fun lhead(): List<String> = labels()[0].split(' ')
+
+    /** (0.5.11) a Fantasy CFW's entry reaches the core with virt (its badge), and step 16's filter lists it alone:
+     *  that filter's first pad + the jog asks for it (the web's test.mjs "virt reaches the core") */
+    @Test fun aFantasyCfwIsVirtOnTheCoreAndStep16ListsItAlone() {
+        val ripple = MoveFw("ripple", "Ripple", "0.4", "0.4", null, 0, 255, true, key = "ripple")
+        val host = setup(extra = listOf(ripple))
+        val lines = MoveNative.testFw(h).lines().filter { it.isNotEmpty() }.drop(1)
+        assertEquals("ripple|0.4|0.4|0|255|1|0", lines.first { it.startsWith("ripple|") })
+        lines.filter { !it.startsWith("ripple|") }.forEach { assertEquals(it, "0", it.split('|')[5]) }
+        // the browser (Track 1 held + step 1), step 16 (Fantasy), its first pad, the jog's click
+        cc(43, 127); press(MoveNative.note(16, 127)); press(MoveNative.note(16, 0)); cc(43, 0)
+        step(20)
+        press(MoveNative.note(31, 100)); press(MoveNative.note(31, 0))
+        step(20)
+        press(MoveNative.note(92, 100)); press(MoveNative.note(92, 0))
+        step(20)
+        cc(3, 127); cc(3, 0)
+        var asked: Pair<String, (String?) -> Unit>? = null
+        await("FW_LOAD") { asked = host.loads.poll(); asked != null }
+        assertEquals("step 16 lists the Fantasy CFW alone", "ripple", asked!!.first)
+        asked!!.second("not here")
+    }
+
+    /** (0.5.11) the firmware's live labels (DYNAMIC-LABELS: RemoteFM1's labels_core fixture) reach the core after a
+     *  load, whole; the "Firmware's button names" setting off clears them; readouts kept before a load or an unload are
+     *  forgotten, and the unload clears the labels */
+    @Test fun liveLabelsReachTheCoreAfterALoadAndGoOnUnload() {
+        val host = setup()
+        val e = engine!!
+        MoveNative.testReadout(h, 3, "CUTOFF", "64")
+        await("a readout kept") { lhead()[1] != "0" }
+        assertEquals("no labels yet", "0", lhead()[0])
+        val f = File(dir, "labels_core.rfm1")
+        InstrumentationRegistry.getInstrumentation().context.assets.open("firmware/labels_core.rfm1").use { i ->
+            f.outputStream().use { i.copyTo(it) }
+        }
+        assertEquals(null, e.loadWasm(f.path))
+        assertTrue(e.boot())
+        host.playing = "labeltest"
+        await("its labels; the old firmware's readout forgotten on the load") { lhead()[0] == "5" && lhead()[1] == "0" }
+        val l = labels()
+        assertEquals("1|DRUMS", l[1 + 8])           // FX
+        assertEquals("1|", l[1 + 9])                // SEL: no job
+        assertEquals("0|", l[1 + 13])               // GLO: not given
+        assertEquals("1|CUTOFF", l[1 + 3])          // KNOB 1
+        assertEquals("1|STEP 1", l[1 + 22])         // W1
+        assertEquals("1|MUTE", l[1 + 38])           // B1
+        assertEquals("0|", l[1 + 0])
+        // the "Firmware's button names" setting off: none (as the web page sends them only with it on); on: again
+        e.setButtonNames(false)
+        await("cleared with the setting off") { lhead()[0] == "0" }
+        e.setButtonNames(true)
+        await("back with it on") { lhead()[0] == "5" }
+        // a readout, then the unload: both gone
+        MoveNative.testReadout(h, 3, "CUTOFF", "80")
+        await("a readout kept") { lhead()[1] != "0" }
+        e.unload()
+        host.playing = null
+        await("cleared on unload") { head()[3] == "-" && lhead()[0] == "0" && lhead()[1] == "0" }
+    }
+
+    /** (0.5.11) the app's volume is slot 0's level (100 = full) at start and when it changes, with no level sent back;
+     *  the Move's own level (Track 1 held + the volume knob) comes to the app; the library keeps it */
+    @Test fun theAppsVolumeAndTheMovesLevelBothWays() {
+        val host = setup(vol = 0.5f)
+        await("the app's volume as the level at start") { lhead()[2] == "50" }
+        link!!.pageLevel(0.8f)
+        await("the app's volume changed") { lhead()[2] == "80" }
+        step(300)
+        assertTrue("no level back to the app: ${host.levels}", host.levels.isEmpty())
+        // the Move's own edit needs a firmware in the slot (Track 1 held + the volume knob)
+        host.playing = "felucca"
+        await("slot 0 holds one") { head()[3] == "felucca" }
+        cc(43, 127); cc(79, 5); cc(43, 0)
+        await("the Move's level to the app") { host.levels.isNotEmpty() }
+        assertEquals(85, host.levels.peek())
+        assertEquals("85", lhead()[2])
+        assertEquals(0.85f, MoveLink.volumeOf(host.levels.peek()!!), 1e-6f)
+        link!!.flush()
+        val lib = File(dir, "library.bin")
+        await("the library keeps it") { lib.isFile && lib.length() > 6 && lib.readBytes()[6].toInt() == 85 }
     }
 
     @Test fun anUnloadEmptiesSlotZero() {

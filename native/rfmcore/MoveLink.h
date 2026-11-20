@@ -18,6 +18,9 @@
 // The firmware browser (0.5.10's single-firmware host, rfm_move_fw_caps(0): one slot, no FX): the app's catalog as an
 // array the driver owns (fwList: kept alive until the next list), the load / download answers (fwProgress, fwInstalled,
 // fwSlot); the library blob given at start (the constructor). The core's FW_* actions come out as Requests.
+// (0.5.11, the host guide's sections 20..24) the firmware's live labels from the engine (MoveTarget::moveLabels, with
+// the button names), the readouts forgotten when slot 0 changes or a Move load ends (the engines give no readout
+// record yet: none are sent, as on the web page), and the app's volume as slot 0's level (fwSetLevel).
 #pragma once
 
 #include <array>
@@ -47,6 +50,11 @@ struct MoveTarget {
     // (0.5.6) the running firmware's own button names (FM1P_B_* order, "" none; all "" when the app's "Firmware's
     // button names" setting is off) if they changed since [gen] (then gen updated); false: unchanged
     virtual bool moveButtonNames(uint32_t &gen, std::array<std::string, RFM_MOVE_NBTN> &names) { (void)gen, (void)names; return false; }
+    // (0.5.11) the running firmware's live labels (DYNAMIC-LABELS order; only with the "Firmware's button names"
+    // setting on, as on the web page) if they changed since [seen] (then seen updated): given[i] 0 = not given, all 0 =
+    // none (cleared); false: unchanged. The core's thread
+    virtual bool moveLabels(uint64_t &seen, std::array<std::string, RFM_MOVE_LBL_N> &lbl,
+                            std::array<uint8_t, RFM_MOVE_LBL_N> &given) { (void)seen, (void)lbl, (void)given; return false; }
     virtual ~MoveTarget() = default;
 };
 
@@ -110,6 +118,9 @@ public:
     void fwInstalled(const std::string &id, const std::string *version);   // a download landed (NULL: removed)
     void fwSlot(const std::string &id);                                // what slot 0 holds now ("" empty)
     void fwProgress(const std::string &id, int pct);                   // 0..100, RFM_MOVE_FW_FAILED / _BUSY
+    // (0.5.11) the app's volume as slot 0's level 0..127 (rfm_move_fw_set_level, as the web page's slider): the
+    // library keeps it; its FW_LEVEL is not handed back to the app (no loop)
+    void fwSetLevel(int slot, int level);
 
     // ---- the core thread (RFMEngine)
     void coreTick(uint32_t ms, MoveTarget &t, const uint8_t levels[RFM_MOVE_NLEVELS], uint8_t playGreen,
@@ -132,6 +143,10 @@ public:
     // the core's firmware state: "caps active track slot0 n" then a line an entry "id|version|installed|cats|cat|virt|
     // thumb" (installed "-": NULL; thumb 1: one given)
     std::string testFw();
+    // (0.5.11) the core's labels and readouts: "given readouts level0" then a line a label "1|text" (given) or "0|";
+    // readouts: the knobs' kept ones and the one up on its own; testReadout puts one in (rfm_move_readout, the driver)
+    std::string testLabels();
+    void testReadout(int control, const std::string &title, const std::string &value);
 
 private:
     // the catalog the core reads (rfm_move_fw_list's contract): the entries' strings, the array pointing into them,
@@ -145,7 +160,7 @@ private:
     // (the tests' fake Move)
     struct In {
         enum Kind { kRx, kOpened, kClosed, kStart, kStop, kInit, kDir, kInfo, kAnswer, kFlush, kTestUp,
-                    kFwList, kFwInstalled, kFwSlot, kFwProgress } kind;
+                    kFwList, kFwInstalled, kFwSlot, kFwProgress, kFwLevel, kTestReadout } kind;
         explicit In(Kind k) : kind(k) {}
         uint32_t attempt = 0, bits = 0;
         int slot = -1;
@@ -208,6 +223,8 @@ private:
     std::deque<Pending> pending_;            // panel / MIDI actions for the core thread
     std::vector<In> work_;
     std::shared_ptr<FwList> fwList_;         // the catalog the core holds now
+    std::string fwSlotId_;                   // what slot 0 was said to hold (a change: the readouts forgotten)
+    bool hostLevel_ = false;                 // (fwSetLevel) its FW_LEVEL is the app's own: not handed back
     // the test fake Move
     bool fakeUp_ = false, fakeOpen_ = false, fakeHello_ = false;
     uint32_t fakeStatusAt_ = 0;
@@ -223,6 +240,10 @@ private:
     int lastMaster_ = -1;
     uint32_t leadUs_ = ~0u;
     uint32_t namesGen_ = 0;                  // the firmware's button names last given (0: none yet / cleared)
+    uint64_t lblSeen_ = 0;                   // (0.5.11) the live labels last given (moveLabels; 0: none yet / cleared)
+    uint32_t lblAt_ = 0;                     // when they were last asked for
+    std::array<std::string, RFM_MOVE_LBL_N> lbl_;
+    std::array<uint8_t, RFM_MOVE_LBL_N> lblGiven_{};
     std::vector<uint16_t> lcd_;              // the FM-1's screen in this CPU's byte order
 
     // ---- Sample and the metronome (the core thread's): marks at ring positions, the take's queue

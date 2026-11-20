@@ -22,6 +22,7 @@ namespace {
 constexpr uint32_t kFrameMs = 33;           // the FM-1's screen into the session at most ~30 a second
 constexpr uint32_t kDriveIdleMs = 100;      // the core thread this quiet: the network thread drives the session
 constexpr size_t kMaxIn = 4096, kMaxPending = 1024, kMaxLeds = 8192;
+constexpr uint32_t kLabelMs = 16;           // the firmware's label epoch asked at most this often
 
 uint32_t wallMs()
 {
@@ -186,6 +187,23 @@ void MoveLink::fwProgress(const std::string &id, int pct)
     In m(In::kFwProgress);
     m.shown = id;
     m.slot = pct;
+    post(std::move(m));
+}
+
+void MoveLink::fwSetLevel(int slot, int level)
+{
+    In m(In::kFwLevel);
+    m.slot = slot;
+    m.bits = (uint32_t)level;
+    post(std::move(m));
+}
+
+void MoveLink::testReadout(int control, const std::string &title, const std::string &value)
+{
+    In m(In::kTestReadout);
+    m.slot = control;
+    m.shown = title;
+    m.bytes.assign(value.begin(), value.end());
     post(std::move(m));
 }
 
@@ -366,18 +384,38 @@ void MoveLink::drive(uint32_t now, bool core)
         case In::kFwSlot: {                     // (one slot: ids past 0 are ignored)
             const char *ids[RFM_MOVE_FW_SLOTS] = {m.shown.empty() ? nullptr : m.shown.c_str(), nullptr, nullptr};
             rfm_move_fw_slots(&s_->core, ids);
-            if (m.shown.empty()) {              // (nothing plays: no button names; a load gives them again)
+            if (m.shown != fwSlotId_) {         // (0.5.7: the kept readouts were the old firmware's)
+                fwSlotId_ = m.shown;
+                rfm_move_readouts_clear(&s_->core);
+            }
+            if (m.shown.empty()) {              // (nothing plays: no button names, no labels; a load gives them again)
                 const char *none[RFM_MOVE_NBTN] = {};
                 rfm_move_set_button_names(&s_->core, none);
                 namesGen_ = 0;
+                rfm_move_set_labels(&s_->core, nullptr);
+                lblSeen_ = 0;
             }
             rfm1cs_session_redraw(s_, now);
             break;
         }
         case In::kFwProgress:
             rfm_move_fw_progress(&s_->core, m.shown.c_str(), m.slot);
+            if (m.slot == 100 || m.slot < 0)    // (a load from the Move done or failed: as the web page, forgotten)
+                rfm_move_readouts_clear(&s_->core);
             rfm1cs_session_redraw(s_, now);
             break;
+        case In::kFwLevel:                      // (its FW_LEVEL dropped in action(); FW_LIBRARY kept)
+            hostLevel_ = true;
+            if (rfm_move_fw_set_level(&s_->core, m.slot, (int)m.bits) >= 0)
+                rfm1cs_session_redraw(s_, now);
+            hostLevel_ = false;
+            break;
+        case In::kTestReadout: {
+            const std::string v(m.bytes.begin(), m.bytes.end());
+            rfm_move_readout(&s_->core, m.slot, RFM_MOVE_RD_PARAM, m.shown.c_str(), v.c_str(), 500, 0, 0);
+            rfm1cs_session_redraw(s_, now);
+            break;
+        }
         }
     }
     work_.clear();
@@ -555,6 +593,8 @@ void MoveLink::action(const rfm1cs_event_t &ev)
     case RFM_MOVE_ACT_FW_DOWNLOAD:
     case RFM_MOVE_ACT_FW_LEVEL:
     case RFM_MOVE_ACT_FW_LIBRARY: {
+        if (a.kind == RFM_MOVE_ACT_FW_LEVEL && hostLevel_)
+            return;                             // (the app's own volume: not played back to it)
         Request r;
         r.kind = a.kind, r.slot = a.slot, r.value = a.value;
         if (a.kind == RFM_MOVE_ACT_FW_LIBRARY) {
@@ -647,6 +687,21 @@ void MoveLink::coreTick(uint32_t ms, MoveTarget &t, const uint8_t levels[RFM_MOV
             for (int b = 0; b < RFM_MOVE_NBTN; b++)
                 p[b] = nm[(size_t)b].empty() ? nullptr : nm[(size_t)b].c_str();
             rfm_move_set_button_names(&s_->core, p);
+            rfm1cs_session_redraw(s_, now);
+        }
+    }
+    // (0.5.11, the host guide's section 20) the firmware's live labels, whole: on a load, the setting, and whenever
+    // the firmware's epoch moves (asked every kLabelMs: the epoch is a call into the firmware)
+    if (lblSeen_ == 0 || now - lblAt_ >= kLabelMs) {
+        lblAt_ = now;
+        if (t.moveLabels(lblSeen_, lbl_, lblGiven_)) {
+            const char *p[RFM_MOVE_LBL_N];
+            bool any = false;
+            for (int i = 0; i < RFM_MOVE_LBL_N; i++) {
+                p[i] = lblGiven_[(size_t)i] ? lbl_[(size_t)i].c_str() : nullptr;
+                any = any || p[i];
+            }
+            rfm_move_set_labels(&s_->core, any ? p : nullptr);
             rfm1cs_session_redraw(s_, now);
         }
     }
@@ -853,6 +908,22 @@ std::string MoveLink::testFw()
                       e.installed && e.installed[0] ? e.installed : "-", e.cats, e.cat, e.virt, e.thumb ? 1 : 0);
         out += line;
     }
+    return out;
+}
+
+std::string MoveLink::testLabels()
+{
+    std::lock_guard<std::mutex> g(smu_);
+    const rfm_move_t &c = s_->core;
+    int given = 0, rd = 0;
+    for (int i = 0; i < RFM_MOVE_LBL_N; i++)
+        given += c.lbl_has[i] ? 1 : 0;
+    for (const rfm_move_readout_t &r : c.rd)
+        rd += r.on ? 1 : 0;
+    std::string out = std::to_string(given) + " " + std::to_string(rd + (c.rd_pop.on ? 1 : 0)) + " " +
+                      std::to_string(rfm_move_fw_level(&c, 0)) + "\n";
+    for (int i = 0; i < RFM_MOVE_LBL_N; i++)
+        out += std::string(c.lbl_has[i] ? "1|" : "0|") + c.lbl[i] + "\n";
     return out;
 }
 

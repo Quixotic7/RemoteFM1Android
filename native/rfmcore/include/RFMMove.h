@@ -113,8 +113,15 @@ void rfmm_fw_installed(rfmm_t *m, const char *id, const char *version);
 void rfmm_fw_slot(rfmm_t *m, const char *id);
 void rfmm_fw_progress(rfmm_t *m, const char *id, int pct);
 uint32_t rfmm_library_max(void);
+// (0.5.11) the app's volume as a slot's level 0..127 (rfm_move_fw_set_level, as the web page's volume slider): the
+// library keeps it; no RFMM_REQ_FW_LEVEL comes back for it. Any thread: queued for the core's
+void rfmm_fw_set_level(rfmm_t *m, int slot, int level);
 // (tests) the core's firmware state as text (MoveLink::testFw): its length (copied up to cap - 1, NUL-terminated)
 int rfmm_test_fw(rfmm_t *m, char *out, uint32_t cap);
+// (tests, 0.5.11) the core's live labels, kept readouts and slot 0's level as text (MoveLink::testLabels), as
+// rfmm_test_fw; a readout put in (a knob's: control 0..7)
+int rfmm_test_labels(rfmm_t *m, char *out, uint32_t cap);
+void rfmm_test_readout(rfmm_t *m, int control, const char *title, const char *value);
 
 // (RFMEngine) the Move's core runs on this engine's core thread; NULL detaches it
 void rfme_attach_move(rfme_t *e, rfmm_t *m);

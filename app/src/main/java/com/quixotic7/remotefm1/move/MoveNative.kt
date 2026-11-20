@@ -129,6 +129,13 @@ object MoveNative {
     /** (tests) the core's firmware state: "caps active track slot0 n", then "id|version|installed|cats|cat|virt|thumb"
      *  a line (installed "-": none; thumb 1: given) */
     fun testFw(h: Long): String = nativeTestFw(h)
+    /** (0.5.11) the app's volume as slot 0's level 0..127 (the web page's fwSetLevel): kept in the library, no
+     *  [REQ_FW_LEVEL] back */
+    fun fwSetLevel(h: Long, slot: Int, level: Int) = nativeFwSetLevel(h, slot, level)
+    /** (tests, 0.5.11) "given readouts level0", then 49 lines "1|label" (given) or "0|" */
+    fun testLabels(h: Long): String = nativeTestLabels(h)
+    /** (tests) a knob's readout put in (control 0..7) */
+    fun testReadout(h: Long, control: Int, title: String, value: String) = nativeTestReadout(h, control, title, value)
 
     // tests: a fake Move in place of the socket (it answers HELLO and sends a STATUS every 500 ms); down: the link cut
     // (lost, tried again in 1 s); testDrop: the real socket cut; testClose: a close from that try's socket (0: the
@@ -153,6 +160,9 @@ object MoveNative {
     @JvmStatic private external fun nativeFwSlot(h: Long, id: String?)
     @JvmStatic private external fun nativeFwProgress(h: Long, id: String, pct: Int)
     @JvmStatic private external fun nativeTestFw(h: Long): String
+    @JvmStatic private external fun nativeFwSetLevel(h: Long, slot: Int, level: Int)
+    @JvmStatic private external fun nativeTestLabels(h: Long): String
+    @JvmStatic private external fun nativeTestReadout(h: Long, control: Int, title: String, value: String)
     @JvmStatic private external fun nativeFree(h: Long)
     @JvmStatic private external fun nativeStart(h: Long, host: String, shown: String)
     @JvmStatic private external fun nativeStop(h: Long)

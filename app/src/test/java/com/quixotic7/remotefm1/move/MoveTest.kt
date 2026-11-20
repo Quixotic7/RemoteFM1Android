@@ -290,3 +290,23 @@ class MoveTakesTest {
         assertTrue(t.finish(1, 1200)!!.name.endsWith("-120bpm-1bar.wav"))
     }
 }
+
+/** (0.5.11) the app's volume <-> the Move's slot 0 level, the web page's scales (move-link.js pageLevel, main.js level) */
+class MoveLevelTest {
+    @Test fun volumeToLevel() {
+        assertEquals(0, MoveLink.levelOf(0f))
+        assertEquals(50, MoveLink.levelOf(0.5f))
+        assertEquals(80, MoveLink.levelOf(0.8f))
+        assertEquals("full is 100", 100, MoveLink.levelOf(1f))
+        assertEquals("kept to 0..127", 127, MoveLink.levelOf(3f))
+        assertEquals(0, MoveLink.levelOf(-1f))
+    }
+
+    @Test fun levelToVolume() {
+        assertEquals(0f, MoveLink.volumeOf(0), 0f)
+        assertEquals(0.85f, MoveLink.volumeOf(85), 1e-6f)
+        assertEquals(1f, MoveLink.volumeOf(100), 0f)
+        assertEquals("above 100: full", 1f, MoveLink.volumeOf(127), 0f)
+        for (l in 0..100) assertEquals("level $l there and back", l, MoveLink.levelOf(MoveLink.volumeOf(l)))
+    }
+}

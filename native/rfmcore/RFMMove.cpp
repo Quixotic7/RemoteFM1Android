@@ -129,6 +129,20 @@ void rfmm_fw_installed(rfmm_t *m, const char *id, const char *version)
 void rfmm_fw_slot(rfmm_t *m, const char *id) { L(m)->fwSlot(id ? id : ""); }
 void rfmm_fw_progress(rfmm_t *m, const char *id, int pct) { L(m)->fwProgress(id ? id : "", pct); }
 uint32_t rfmm_library_max(void) { return RFM_MOVE_FW_LIB_BYTES; }
+void rfmm_fw_set_level(rfmm_t *m, int slot, int level) { L(m)->fwSetLevel(slot, level); }
+
+int rfmm_test_labels(rfmm_t *m, char *out, uint32_t cap)
+{
+    const std::string s = L(m)->testLabels();
+    if (cap)
+        std::snprintf(out, cap, "%s", s.c_str());
+    return (int)s.size();
+}
+
+void rfmm_test_readout(rfmm_t *m, int control, const char *title, const char *value)
+{
+    L(m)->testReadout(control, title ? title : "", value ? value : "");
+}
 
 int rfmm_test_fw(rfmm_t *m, char *out, uint32_t cap)
 {
