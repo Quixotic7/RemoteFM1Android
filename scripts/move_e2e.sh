@@ -5,7 +5,8 @@
 # build/sim/moveremote-sim, beside this repo, or $MOVEREMOTE_SIM) on a spare port with its test FIFO, the instrumented
 # test connecting to it at 10.0.2.2, and the presses: a pad, Track 4, steps 1 and 5, Play. Then the simulator's own
 # screen shot is checked (the app drew it). The app and its tests must be installed (./gradlew installDebug
-# installDebugAndroidTest). Never a real Move.
+# installDebugAndroidTest). Never a real Move. (0.5.10) After the shot, the firmware browser: Track 1 held + step 1,
+# Felucca's pad, the jog's click (the test answers the load).
 #   SERIAL=emulator-5558 scripts/move_e2e.sh
 set -u
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -48,6 +49,14 @@ cmd "cc 85 127" 0.05            # Play
 cmd "cc 85 0" 2.5
 cmd "shot" 0.5                  # (the test stays connected 3 s after its checks: the app's screen, the state)
 STATE="$(cat "$DIR/mr-state" 2>/dev/null)"
+cmd "cc 43 127" 0.05            # (0.5.10) the firmware browser: Track 1 held + step 1, the projects view
+cmd "note 16 127" 0.05
+cmd "note 16 0" 0.05
+cmd "cc 43 0" 0.6
+cmd "note 94 100" 0.05          # Felucca's pad (cell 2 of the bundled cores, A-Z: the top row's third)
+cmd "note 94 0" 0.4
+cmd "cc 3 127" 0.05             # the jog's click: FW_LOAD (the test loads it and says slot 0 back)
+cmd "cc 3 0" 1.5
 wait "$IPID"
 cat "$DIR/instrument.txt"
 echo "move_e2e: simulator state: $STATE"

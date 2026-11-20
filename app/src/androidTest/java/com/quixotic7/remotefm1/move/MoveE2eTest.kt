@@ -4,8 +4,10 @@
 // 10.0.2.2), over the real socket thread and rfm1cs-abletonmove's session: scripts/move_e2e.sh starts the simulator, runs this with
 // `-e moveSim 10.0.2.2:<port>`, waits for the link, then presses through the simulator's test FIFO: a pad (an FM-1
 // key), Track 4, steps 1 and 5, Play. This side checks the key played, the LEDs and screens went out, the mode, and
-// the sequencer's notes reached the firmware (the echo core) on the beat; then the socket is cut and the session
-// connects again by itself. Skipped without the argument.
+// the sequencer's notes reached the firmware (the echo core) on the beat; (0.5.10) the firmware browser with the
+// bundled cores as its list: the script's Track 1 held + step 1, Felucca's pad (cell 2, A-Z) and the jog's click ask
+// for a load, done here as the app does (the core into the engine, progress 100, slot 0 said back); then the socket is
+// cut and the session connects again by itself. Skipped without the argument.
 package com.quixotic7.remotefm1.move
 
 import android.os.SystemClock
@@ -32,6 +34,12 @@ class MoveE2eTest {
             e.midiOutEnable(2)
             e.setClock(RfmEngine.CLOCK_CALLER)
             e.moveAttach(h)
+            val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+            RfmEngine.scan(ctx.applicationInfo.nativeLibraryDir)
+            val list = MoveCatalog.build(com.quixotic7.remotefm1.firmware.CoreInfo.builtInList(RfmEngine.cores()), emptyMap(),
+                emptyList(), { com.quixotic7.remotefm1.firmware.InstallState.NotInstalled }, emptyMap())
+            assertEquals("Felucca's pad in the script: ${list.map { it.id }}", 2, list.indexOfFirst { it.id == "felucca" })
+            MoveNative.fwList(h, list)
             MoveNative.start(h, sim!!)
             val panel = IntArray(56)
             val pk = IntArray(64)
@@ -77,6 +85,35 @@ class MoveE2eTest {
             assertTrue("note-ons $ons", ons.size >= 3)
             assertTrue("step 5 after step 1: ${ons[1] - ons[0]} ms", kotlin.math.abs(ons[1] - ons[0] - 500) <= 2)
             assertTrue("the bar: ${ons[2] - ons[0]} ms", kotlin.math.abs(ons[2] - ons[0] - 2000) <= 2)
+            // the firmware browser: the script's presses ask for Felucca; loaded here, then slot 0 said back
+            val req = IntArray(4)
+            val data = ByteArray(MoveNative.projectMax)
+            var load: String? = null
+            val asked = SystemClock.elapsedRealtime() + 20_000
+            while (load == null && SystemClock.elapsedRealtime() < asked) {
+                val now = SystemClock.elapsedRealtime()
+                if (now > last) { e.run((now - last).toInt()); last = now }
+                while (true) {
+                    val n = MoveNative.takeRequest(h, req, data)
+                    if (n < 0) break
+                    if (req[0] == MoveNative.REQ_FW_LOAD) load = String(data, 0, n, Charsets.US_ASCII)
+                }
+                SystemClock.sleep(2)
+            }
+            Log.i("RFMMoveE2e", "browser: FW_LOAD ${load ?: "never"}; ${MoveNative.testFw(h).lineSequence().first()}")
+            assertEquals("the jog's click loads Felucca", "felucca", load)
+            assertEquals(null, e.load("felucca"))
+            assertTrue(e.boot())
+            MoveNative.fwProgress(h, "felucca", 100)
+            MoveNative.fwSlot(h, "felucca")
+            val said = SystemClock.elapsedRealtime() + 3000
+            while (MoveNative.testFw(h).lineSequence().first().split(' ')[3] != "felucca" && SystemClock.elapsedRealtime() < said) {
+                val now = SystemClock.elapsedRealtime()
+                if (now > last) { e.run((now - last).toInt()); last = now }
+                SystemClock.sleep(2)
+            }
+            assertEquals("felucca", MoveNative.testFw(h).lineSequence().first().split(' ')[3])
+            assertEquals("felucca", e.status().optString("core_id"))
             // the socket cut under the session: lost, RETRYING, connected again by itself (~1 s)
             MoveNative.testDrop(h)
             var retrying = false
